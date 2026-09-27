@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package chatter.v1;
+
+option go_package = "github.com/thehien0811/chatter/proto;proto";
+
+// SendMessage persists first, then ChatService publishes an event to each
+// recipient channel: chat:user:<user_id>. Offline notification work is sent
+// by ChatService to RabbitMQ queue notification.
+service ChatService {
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+  rpc ListUnreadMessages(ListUnreadMessagesRequest) returns (ListUnreadMessagesResponse);
+  rpc MarkDelivered(MarkDeliveredRequest) returns (MarkDeliveredResponse);
+}
+
+message SendMessageRequest {
+  string conversation_id = 1;
+  string sender_id = 2;
+  string body = 3;
+}
+
+message SendMessageResponse {
+  string message_id = 1;
+  bool success = 2;
+}
+
+message ListMessagesRequest {
+  string conversation_id = 1;
+  int32 limit = 2;
+}
+
+message ListMessagesResponse { repeated string message_ids = 1; }
+
+// Lists persisted messages that are not yet delivered to this user.
+message ListUnreadMessagesRequest {
+  string user_id = 1;
+  int32 limit = 2;
+}
+
+message UnreadMessage {
+  string message_id = 1;
+  string conversation_id = 2;
+  string sender_id = 3;
+  string body = 4;
+  string created_at = 5;
+}
+
+message ListUnreadMessagesResponse { repeated UnreadMessage messages = 1; }
+
+// Marks one message delivered for the given recipient.
+message MarkDeliveredRequest {
+  string user_id = 1;
+  string message_id = 2;
+}
+
+message MarkDeliveredResponse { bool success = 1; }

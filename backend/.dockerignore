@@ -1,0 +1,9 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+**/*_test.go
+coverage.out
+bin
+.tmp

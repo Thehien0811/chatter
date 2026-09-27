@@ -1,0 +1,195 @@
+services:
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chatter-api-gateway:local
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      APP_PORT: "8080"
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SERVICES_AUTH_URL: auth-service:9001
+      SERVICES_USER_URL: user-service:9005
+      SERVICES_FRIEND_URL: friend-service:9002
+      SERVICES_CHAT_URL: chat-service:9003
+      SERVICES_CALL_URL: call-service:9004
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      friend-service:
+        condition: service_started
+      chat-service:
+        condition: service_started
+      call-service:
+        condition: service_started
+    networks:
+      - chatter
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: docker/auth/Dockerfile
+    image: chatter-auth-service:local
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      GRPC_PORT: "9001"
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      SERVICES_USER_URL: user-service:9005
+    depends_on:
+      user-service:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - chatter
+
+  friend-service:
+    build:
+      context: .
+      dockerfile: docker/friend/Dockerfile
+    image: chatter-friend-service:local
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      GRPC_PORT: "9002"
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_NAME: ${POSTGRES_DB:-chatter}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - chatter
+
+  chat-service:
+    build:
+      context: .
+      dockerfile: docker/chat/Dockerfile
+    image: chatter-chat-service:local
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      GRPC_PORT: "9003"
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_NAME: ${POSTGRES_DB:-chatter}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-chatter}:${RABBITMQ_PASSWORD:-chatter}@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - chatter
+
+  call-service:
+    build:
+      context: .
+      dockerfile: docker/call/Dockerfile
+    image: chatter-call-service:local
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      GRPC_PORT: "9004"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - chatter
+
+  user-service:
+    build:
+      context: .
+      dockerfile: docker/user/Dockerfile
+    image: chatter-user-service:local
+    pull_policy: build
+    restart: unless-stopped
+    environment:
+      GRPC_PORT: "9005"
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER:-postgres}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DB_NAME: ${POSTGRES_DB:-chatter}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - chatter
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-chatter}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations/001_init_schema.sql:/docker-entrypoint-initdb.d/001_init_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatter
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatter
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-chatter}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-chatter}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatter
+
+networks:
+  chatter:
+    name: chatter-internal
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:

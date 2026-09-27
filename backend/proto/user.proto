@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package chatter.v1;
+
+option go_package = "github.com/thehien0811/chatter/proto;proto";   
+
+// UserService owns account/profile persistence; the gateway never accesses its database.
+service UserService {
+  rpc Register(RegisterUserRequest) returns (User);
+  rpc GetUserByID(GetUserByIDRequest) returns (User);
+  rpc UpdateUser(UpdateUserRequest) returns (User);
+  rpc ValidateCredentials(ValidateCredentialsRequest) returns (User);
+}
+
+message RegisterUserRequest {
+  string username = 1;
+  string display_name = 2;
+  string email = 3;
+  string password = 4;
+}
+
+message GetUserByIDRequest { string user_id = 1; }
+
+message UpdateUserRequest {
+  string user_id = 1;
+  string display_name = 2;
+  string email = 3;
+  string status_message = 4;
+}
+
+message User {
+  string id = 1;
+  string username = 2;
+  string display_name = 3;
+  string email = 4;
+  string presence = 5;
+  string status_message = 6;
+}
+
+message ValidateCredentialsRequest {
+  string username = 1;
+  string password = 2;
+}

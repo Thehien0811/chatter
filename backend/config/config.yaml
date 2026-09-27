@@ -1,0 +1,32 @@
+app:
+  name: chatter
+  env: development
+  port: 8080
+
+jwt:
+  secret: change-me-in-production
+  expiry: 2h
+
+database:
+  host: localhost
+  port: 5432
+  user: postgres
+  password: postgres
+  name: chatter
+  ssl_mode: disable
+
+redis:
+  host: localhost
+  port: 6379
+  password: ""
+  db: 0
+
+casbin:
+  model_file: config/casbin/model.conf
+
+services:
+  auth_url: localhost:9001
+  user_url: localhost:9005
+  friend_url: localhost:9002
+  chat_url: localhost:9003
+  call_url: localhost:9004

@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package chatter.v1;
+
+option go_package = "github.com/thehien0811/chatter/proto;proto";
+
+// AuthService owns credential verification and access/refresh token issuance.
+service AuthService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string user_id = 1;
+  string access_token = 2;
+  string refresh_token = 3;
+}
+
+message RefreshRequest { string refresh_token = 1; }
+
+message RefreshResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+}
+
+message ValidateTokenRequest { string access_token = 1; }
+
+message ValidateTokenResponse {
+  string user_id = 1;
+  string role = 2;
+  bool valid = 3;
+}
