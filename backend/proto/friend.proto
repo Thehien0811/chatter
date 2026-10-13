@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package chatter.v1;
+
+option go_package = "github.com/thehien0811/chatter/proto;proto";
+
+service FriendService {
+  rpc SendFriendRequest(SendFriendRequestRequest) returns (FriendRequest);
+  rpc ListFriendRequests(ListFriendRequestsRequest) returns (ListFriendRequestsResponse);
+  rpc RespondFriendRequest(RespondFriendRequestRequest) returns (FriendRequest);
+  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse);
+  rpc IsFriend(IsFriendRequest) returns (IsFriendResponse);
+  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
+}
+
+message FriendUser { string id = 1; string username = 2; string display_name = 3; }
+message SendFriendRequestRequest { string from_user_id = 1; string to_user_id = 2; }
+message ListFriendRequestsRequest { string user_id = 1; string direction = 2; }
+message RespondFriendRequestRequest { string request_id = 1; string user_id = 2; bool accept = 3; }
+message ListFriendsRequest { string user_id = 1; }
+message IsFriendRequest { string user_a_id = 1; string user_b_id = 2; }
+message SearchUsersRequest { string query = 1; string exclude_user_id = 2; int32 limit = 3; }
+message FriendRequest {
+  string id = 1;
+  FriendUser from_user = 2;
+  FriendUser to_user = 3;
+  string status = 4;
+  string created_at = 5;
+}
+message ListFriendRequestsResponse { repeated FriendRequest requests = 1; }
+message ListFriendsResponse { repeated FriendUser friends = 1; }
+message IsFriendResponse { bool is_friend = 1; }
+message SearchUsersResponse { repeated FriendUser users = 1; }

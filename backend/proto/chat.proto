@@ -4,40 +4,39 @@ package chatter.v1;
 
 option go_package = "github.com/thehien0811/chatter/proto;proto";
 
-// SendMessage persists first, then ChatService publishes an event to each
-// recipient channel: chat:user:<user_id>. Offline notification work is sent
-// by ChatService to RabbitMQ queue notification.
+// ChatService owns persisted chat data. SendMessage commits before publishing
+// recipient events to Redis channels named chat:user:<user_id>.
 service ChatService {
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc GetOrCreateDirectConversation(GetOrCreateDirectConversationRequest) returns (Conversation);
+  rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
   rpc ListUnreadMessages(ListUnreadMessagesRequest) returns (ListUnreadMessagesResponse);
   rpc MarkDelivered(MarkDeliveredRequest) returns (MarkDeliveredResponse);
 }
 
-message SendMessageRequest {
-  string conversation_id = 1;
-  string sender_id = 2;
-  string body = 3;
+message SendMessageRequest { string conversation_id = 1; string sender_id = 2; string body = 3; }
+message SendMessageResponse { string message_id = 1; bool success = 2; }
+message GetOrCreateDirectConversationRequest { string user_id = 1; string recipient_id = 2; }
+message ListConversationsRequest { string user_id = 1; }
+message ListConversationsResponse { repeated Conversation conversations = 1; }
+message Conversation {
+  string id = 1;
+  string title = 2;
+  string participant_id = 3;
+  string participant_username = 4;
+  string participant_display_name = 5;
+  string participant_presence = 6;
+  string last_message_body = 7;
+  string last_message_sender_id = 8;
+  string updated_at = 9;
+  int32 unread_count = 10;
+  string last_message_id = 11;
 }
-
-message SendMessageResponse {
-  string message_id = 1;
-  bool success = 2;
-}
-
-message ListMessagesRequest {
-  string conversation_id = 1;
-  int32 limit = 2;
-}
-
-message ListMessagesResponse { repeated string message_ids = 1; }
-
-// Lists persisted messages that are not yet delivered to this user.
-message ListUnreadMessagesRequest {
-  string user_id = 1;
-  int32 limit = 2;
-}
-
+message ListMessagesRequest { string conversation_id = 1; int32 limit = 2; string user_id = 3; }
+message Message { string id = 1; string conversation_id = 2; string sender_id = 3; string body = 4; string created_at = 5; }
+message ListMessagesResponse { repeated Message messages = 1; }
+message ListUnreadMessagesRequest { string user_id = 1; int32 limit = 2; }
 message UnreadMessage {
   string message_id = 1;
   string conversation_id = 2;
@@ -45,13 +44,6 @@ message UnreadMessage {
   string body = 4;
   string created_at = 5;
 }
-
 message ListUnreadMessagesResponse { repeated UnreadMessage messages = 1; }
-
-// Marks one message delivered for the given recipient.
-message MarkDeliveredRequest {
-  string user_id = 1;
-  string message_id = 2;
-}
-
+message MarkDeliveredRequest { string user_id = 1; string message_id = 2; }
 message MarkDeliveredResponse { bool success = 1; }

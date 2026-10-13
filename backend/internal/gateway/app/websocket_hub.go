@@ -83,7 +83,7 @@ func (h *websocketHub) register(userID string, conn *websocket.Conn) (func(), er
 }
 
 func (h *websocketHub) subscribe(ctx context.Context, userID string, ready chan<- error) {
-	pubsub := h.redis.Subscribe(ctx, "chat:user:"+userID)
+	pubsub := h.redis.Subscribe(ctx, "chat:user:"+userID, "friend:user:"+userID)
 	defer pubsub.Close()
 	if _, err := pubsub.Receive(ctx); err != nil {
 		ready <- err

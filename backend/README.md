@@ -1,5 +1,7 @@
 # Chatter database design
 
+> API reference: see [docs/API.md](docs/API.md) for current REST, WebSocket, and internal gRPC endpoints and implementation status.
+
 Chatter is a messaging app focused on direct and group chat, adding friends, and video calls. This design uses PostgreSQL for durable application data. Video and audio travel over a real-time media service (for example, WebRTC); the database stores call coordination and history, not media streams.
 
 ## Design overview
@@ -226,6 +228,10 @@ The Gin API Gateway owns client HTTP/WebSocket connections. It does not open a P
 | POST | /api/v1/auth/refresh | Refresh token | AuthService.Refresh |
 | GET | /api/v1/profile | JWT + Casbin | UserService.GetUserByID for the JWT subject |
 | PATCH | /api/v1/profile | JWT + Casbin | UserService.UpdateUser |
+| GET | /api/v1/chat/conversations | JWT + Casbin | ChatService.ListConversations |
+| POST | /api/v1/chat/conversations | JWT + Casbin | ChatService.GetOrCreateDirectConversation (requires accepted friendship) |
+| GET | /api/v1/chat/conversations/:id/messages?limit=50 | JWT + Casbin | ChatService.ListMessages (active membership required) |
+| POST | /api/v1/chat/messages/:id/delivered | JWT + Casbin | ChatService.MarkDelivered for current user |
 | GET | /api/v1/chat/unread?limit=50 | JWT + Casbin | ChatService.ListUnreadMessages, then MarkDelivered for each message |
 | GET | /api/v1/ws/presence?token=<access-token> | JWT + Casbin | WebSocket connection to this gateway |
 
@@ -235,7 +241,7 @@ WebSocket clients send JSON frames such as {"type":"send_message","conversation_
 
 Each gateway instance keeps a local userID -> WebSocket connections pool. For each user connected to that instance, the gateway subscribes to Redis channel chat:user:<userID> and forwards each event payload to that user's local sockets. The Chat Service publishes to the recipient user's channel after committing the message. Redis Pub/Sub provides live fan-out across gateway instances; it is ephemeral and is not the source of truth.
 
-The unread endpoint reads pending messages from the Chat Service/Postgres and marks each result delivered. When a recipient is offline, the Chat Service should keep the message pending and publish a notification job to RabbitMQ's notification queue for a push/email worker. RabbitMQ publishing and push delivery belong to the Chat Service/notification worker, not to the gateway.
+The unread endpoint reads pending messages from Postgres and marks each result delivered. The frontend drains this inbox after each WebSocket connection/reconnection. When Redis has no active presence key for a recipient, Chat Service also publishes a persistent JSON notification to the RabbitMQ `notification` queue for a future push/email worker; delivery recovery remains independent of that notification.
 
 proto/auth.proto, proto/user.proto, and proto/chat.proto define the RPC surface used by the gateway. The Auth Service must sign access JWTs with the same configured verification key/algorithm expected by the gateway, and assign a role claim. Protect internal gRPC links with TLS in deployed environments; the current local client setup uses insecure transport credentials for development. Casbin enforces route/method access in the gateway. The Chat Service must enforce conversation-level authorization for each send/read/delivery RPC because route-level Casbin cannot decide membership in a specific conversation.
 

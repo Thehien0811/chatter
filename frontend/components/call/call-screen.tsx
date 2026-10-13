@@ -1,0 +1,12 @@
+'use client';
+import { useEffect, useRef, useState } from 'react';
+import { Mic, MicOff, PhoneOff, Video, VideoOff } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { useWebRTC } from '@/hooks/use-webrtc';
+import type { User } from '@/types/user';
+import { toast } from 'sonner';
+function StreamVideo({ stream, muted=false, className='' }: { stream:MediaStream|null; muted?:boolean; className?:string }) { const ref=useRef<HTMLVideoElement>(null);useEffect(()=>{if(ref.current)ref.current.srcObject=stream;},[stream]);return <video ref={ref} autoPlay playsInline muted={muted} className={className}/>; }
+export function CallScreen({conversationId,peer,video=true,onEnd}:{conversationId:string;peer:User;video?:boolean;onEnd:()=>void}) {
+ const call=useWebRTC(conversationId);const [position,setPosition]=useState({x:0,y:0});useEffect(()=>{void call.start(video).catch(()=>toast.error('Không thể truy cập camera hoặc microphone.'));},[]);
+ return <div className="fixed inset-0 z-[70] flex flex-col bg-slate-950 text-white"><div className="relative flex flex-1 items-center justify-center overflow-hidden"><StreamVideo stream={call.remoteStream} className="absolute inset-0 h-full w-full object-cover"/><div className="z-10 text-center"><div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-white/10 text-3xl">{peer.display_name.slice(0,1)}</div><p className="mt-4 text-xl font-semibold">{peer.display_name}</p><p className="mt-1 text-sm text-white/70">Đang kết nối…</p></div><div draggable onDragEnd={e=>setPosition({x:position.x+e.clientX-120,y:position.y+e.clientY-120})} style={{transform:`translate(${position.x}px, ${position.y}px)`}} className="absolute bottom-24 right-5 z-20 h-36 w-28 cursor-move overflow-hidden rounded-xl border border-white/30 bg-slate-800 shadow-lg"><StreamVideo stream={call.localStream} muted className="h-full w-full object-cover"/></div></div><div className="flex items-center justify-center gap-4 pb-8"><Button variant="secondary" size="icon" className="h-12 w-12 rounded-full" onClick={call.toggleMic} aria-label="Bật/tắt mic">{call.micEnabled?<Mic/>:<MicOff/>}</Button><Button variant="secondary" size="icon" className="h-12 w-12 rounded-full" onClick={call.toggleCamera} aria-label="Bật/tắt camera">{call.cameraEnabled?<Video/>:<VideoOff/>}</Button><Button variant="destructive" size="icon" className="h-14 w-14 rounded-full" aria-label="Kết thúc cuộc gọi" onClick={()=>{call.end();onEnd();}}><PhoneOff/></Button></div></div>;
+}

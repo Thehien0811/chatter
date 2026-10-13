@@ -13,13 +13,15 @@ import (
 )
 
 type ServiceClients struct {
-	authConn *grpc.ClientConn
-	userConn *grpc.ClientConn
-	chatConn *grpc.ClientConn
+	authConn   *grpc.ClientConn
+	userConn   *grpc.ClientConn
+	chatConn   *grpc.ClientConn
+	friendConn *grpc.ClientConn
 
-	auth pb.AuthServiceClient
-	user pb.UserServiceClient
-	chat pb.ChatServiceClient
+	auth   pb.AuthServiceClient
+	user   pb.UserServiceClient
+	chat   pb.ChatServiceClient
+	friend pb.FriendServiceClient
 }
 
 type RemoteUser struct {
@@ -28,6 +30,44 @@ type RemoteUser struct {
 
 type AuthTokens struct {
 	UserID, AccessToken, RefreshToken string
+}
+
+type ChatParticipant struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Presence    string `json:"presence"`
+}
+
+type ChatMessage struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	SenderID       string `json:"sender_id"`
+	Body           string `json:"body"`
+	CreatedAt      string `json:"created_at"`
+}
+
+type ChatConversation struct {
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Participant ChatParticipant `json:"participant"`
+	LastMessage *ChatMessage    `json:"last_message,omitempty"`
+	UpdatedAt   string          `json:"updated_at"`
+	UnreadCount int32           `json:"unread_count"`
+}
+
+type FriendUser struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+}
+
+type FriendRequest struct {
+	ID        string     `json:"id"`
+	FromUser  FriendUser `json:"from_user"`
+	ToUser    FriendUser `json:"to_user"`
+	Status    string     `json:"status"`
+	CreatedAt string     `json:"created_at"`
 }
 
 type UnreadMessage struct {
@@ -57,13 +97,22 @@ func NewServiceClients(cfg *config.AppConfig) (*ServiceClients, error) {
 		_ = userConn.Close()
 		return nil, fmt.Errorf("dial chat service: %w", err)
 	}
+	friendConn, err := dialService(cfg.Services.FriendURL)
+	if err != nil {
+		_ = authConn.Close()
+		_ = userConn.Close()
+		_ = chatConn.Close()
+		return nil, fmt.Errorf("dial friend service: %w", err)
+	}
 	return &ServiceClients{
-		authConn: authConn,
-		userConn: userConn,
-		chatConn: chatConn,
-		auth:     pb.NewAuthServiceClient(authConn),
-		user:     pb.NewUserServiceClient(userConn),
-		chat:     pb.NewChatServiceClient(chatConn),
+		authConn:   authConn,
+		userConn:   userConn,
+		chatConn:   chatConn,
+		friendConn: friendConn,
+		auth:       pb.NewAuthServiceClient(authConn),
+		user:       pb.NewUserServiceClient(userConn),
+		chat:       pb.NewChatServiceClient(chatConn),
+		friend:     pb.NewFriendServiceClient(friendConn),
 	}, nil
 }
 
@@ -87,6 +136,9 @@ func (s *ServiceClients) Close() {
 	}
 	if s.chatConn != nil {
 		_ = s.chatConn.Close()
+	}
+	if s.friendConn != nil {
+		_ = s.friendConn.Close()
 	}
 }
 
@@ -159,6 +211,52 @@ func (s *ServiceClients) SendMessage(ctx context.Context, conversationID, sender
 	return response.GetMessageId(), nil
 }
 
+func (s *ServiceClients) GetOrCreateDirectConversation(ctx context.Context, userID, recipientID string) (*ChatConversation, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	item, err := s.chat.GetOrCreateDirectConversation(ctx, &pb.GetOrCreateDirectConversationRequest{UserId: userID, RecipientId: recipientID})
+	if err != nil {
+		return nil, err
+	}
+	return chatConversation(item), nil
+}
+
+func (s *ServiceClients) ListConversations(ctx context.Context, userID string) ([]ChatConversation, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.chat.ListConversations(ctx, &pb.ListConversationsRequest{UserId: userID})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ChatConversation, 0, len(response.GetConversations()))
+	for _, item := range response.GetConversations() {
+		items = append(items, *chatConversation(item))
+	}
+	return items, nil
+}
+
+func (s *ServiceClients) ListMessages(ctx context.Context, conversationID, userID string, limit int32) ([]ChatMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.chat.ListMessages(ctx, &pb.ListMessagesRequest{ConversationId: conversationID, UserId: userID, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]ChatMessage, 0, len(response.GetMessages()))
+	for _, m := range response.GetMessages() {
+		items = append(items, ChatMessage{ID: m.GetId(), ConversationID: m.GetConversationId(), SenderID: m.GetSenderId(), Body: m.GetBody(), CreatedAt: m.GetCreatedAt()})
+	}
+	return items, nil
+}
+
+func chatConversation(item *pb.Conversation) *ChatConversation {
+	result := &ChatConversation{ID: item.GetId(), Title: item.GetTitle(), Participant: ChatParticipant{ID: item.GetParticipantId(), Username: item.GetParticipantUsername(), DisplayName: item.GetParticipantDisplayName(), Presence: item.GetParticipantPresence()}, UpdatedAt: item.GetUpdatedAt(), UnreadCount: item.GetUnreadCount()}
+	if item.GetLastMessageId() != "" {
+		result.LastMessage = &ChatMessage{ID: item.GetLastMessageId(), ConversationID: item.GetId(), SenderID: item.GetLastMessageSenderId(), Body: item.GetLastMessageBody(), CreatedAt: item.GetUpdatedAt()}
+	}
+	return result
+}
+
 func (s *ServiceClients) ListUnread(ctx context.Context, userID string, limit int32) ([]UnreadMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -187,6 +285,76 @@ func (s *ServiceClients) MarkDelivered(ctx context.Context, userID, messageID st
 		return fmt.Errorf("chat service rejected delivery update")
 	}
 	return nil
+}
+
+func (s *ServiceClients) SearchUsers(ctx context.Context, userID, query string) ([]FriendUser, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.friend.SearchUsers(ctx, &pb.SearchUsersRequest{Query: query, ExcludeUserId: userID, Limit: 20})
+	if err != nil {
+		return nil, err
+	}
+	users := make([]FriendUser, 0, len(response.GetUsers()))
+	for _, user := range response.GetUsers() {
+		users = append(users, friendUser(user))
+	}
+	return users, nil
+}
+
+func (s *ServiceClients) SendFriendRequest(ctx context.Context, fromUserID, toUserID string) (*FriendRequest, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, err := s.friend.SendFriendRequest(ctx, &pb.SendFriendRequestRequest{FromUserId: fromUserID, ToUserId: toUserID})
+	if err != nil {
+		return nil, err
+	}
+	return friendRequest(request), nil
+}
+
+func (s *ServiceClients) ListFriendRequests(ctx context.Context, userID, direction string) ([]FriendRequest, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.friend.ListFriendRequests(ctx, &pb.ListFriendRequestsRequest{UserId: userID, Direction: direction})
+	if err != nil {
+		return nil, err
+	}
+	requests := make([]FriendRequest, 0, len(response.GetRequests()))
+	for _, request := range response.GetRequests() {
+		requests = append(requests, *friendRequest(request))
+	}
+	return requests, nil
+}
+
+func (s *ServiceClients) RespondFriendRequest(ctx context.Context, requestID, userID string, accept bool) (*FriendRequest, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, err := s.friend.RespondFriendRequest(ctx, &pb.RespondFriendRequestRequest{RequestId: requestID, UserId: userID, Accept: accept})
+	if err != nil {
+		return nil, err
+	}
+	return friendRequest(request), nil
+}
+
+func (s *ServiceClients) ListFriends(ctx context.Context, userID string) ([]FriendUser, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.friend.ListFriends(ctx, &pb.ListFriendsRequest{UserId: userID})
+	if err != nil {
+		return nil, err
+	}
+	friends := make([]FriendUser, 0, len(response.GetFriends()))
+	for _, user := range response.GetFriends() {
+		friends = append(friends, friendUser(user))
+	}
+	return friends, nil
+}
+
+func friendUser(user *pb.FriendUser) FriendUser {
+	return FriendUser{ID: user.GetId(), Username: user.GetUsername(), DisplayName: user.GetDisplayName()}
+}
+
+func friendRequest(request *pb.FriendRequest) *FriendRequest {
+	return &FriendRequest{ID: request.GetId(), FromUser: friendUser(request.GetFromUser()), ToUser: friendUser(request.GetToUser()), Status: request.GetStatus(), CreatedAt: request.GetCreatedAt()}
 }
 
 func remoteUser(user *pb.User) *RemoteUser {

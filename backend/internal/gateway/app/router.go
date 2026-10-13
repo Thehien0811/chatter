@@ -21,14 +21,15 @@ import (
 
 // App is the API gateway bootstrap for the hexagonal structure.
 type App struct {
-	engine      *gin.Engine
-	jwt         *app.JWTService
-	casbin      *app.CasbinService
-	authUC      *usecase.AuthUseCase
-	services    *ServiceClients
-	redisClient *redis.Client
-	secret      string
-	hub         *websocketHub
+	engine                     *gin.Engine
+	jwt                        *app.JWTService
+	casbin                     *app.CasbinService
+	authUC                     *usecase.AuthUseCase
+	services                   *ServiceClients
+	redisClient                *redis.Client
+	secret                     string
+	allowLocalWebSocketOrigins bool
+	hub                        *websocketHub
 }
 
 func NewApp(secret string) *App {
@@ -52,14 +53,15 @@ func NewApp(secret string) *App {
 	services, _ := NewServiceClients(cfg)
 
 	gateway := &App{
-		engine:      gin.Default(),
-		jwt:         jwtSvc,
-		casbin:      casbinSvc,
-		authUC:      authUC,
-		services:    services,
-		redisClient: redisClient,
-		secret:      secret,
-		hub:         newWebsocketHub(redisClient),
+		engine:                     gin.Default(),
+		jwt:                        jwtSvc,
+		casbin:                     casbinSvc,
+		authUC:                     authUC,
+		services:                   services,
+		redisClient:                redisClient,
+		secret:                     secret,
+		allowLocalWebSocketOrigins: strings.EqualFold(cfg.App.Env, "development"),
+		hub:                        newWebsocketHub(redisClient),
 	}
 	gateway.registerRoutes()
 	return gateway
@@ -84,7 +86,17 @@ func (a *App) registerRoutes() {
 	protected := api.Group("")
 	protected.Use(a.requireAuth(), a.authorize())
 	protected.GET("/profile", a.profileHandler)
+	protected.GET("/friends", a.listFriendsHandler)
+	protected.GET("/friend-requests", a.listFriendRequestsHandler)
+	protected.POST("/friend-requests", a.sendFriendRequestHandler)
+	protected.POST("/friend-requests/:id/accept", a.respondFriendRequestHandler(true))
+	protected.POST("/friend-requests/:id/reject", a.respondFriendRequestHandler(false))
+	protected.GET("/users/search", a.searchUsersHandler)
 	protected.GET("/chat/unread", a.unreadMessagesHandler)
+	protected.GET("/chat/conversations", a.listConversationsHandler)
+	protected.POST("/chat/conversations", a.createConversationHandler)
+	protected.GET("/chat/conversations/:id/messages", a.listMessagesHandler)
+	protected.POST("/chat/messages/:id/delivered", a.markMessageDeliveredHandler)
 	protected.PATCH("/profile", a.updateProfileHandler)
 	protected.GET("/users/:id", a.userProfileHandler)
 	protected.PATCH("/users/:id", a.userUpdateHandler)
@@ -185,6 +197,222 @@ func (a *App) handleSocketMessage(ctx context.Context, userID string, conn *webs
 	}
 	ack, _ := json.Marshal(gin.H{"type": "message.accepted", "message_id": messageID})
 	return a.hub.writeConnection(conn, ack)
+}
+
+func (a *App) searchUsersHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "friend service unavailable"})
+		return
+	}
+	query := strings.TrimSpace(c.Query("q"))
+	if len([]rune(query)) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "q must contain at least 2 characters"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	users, err := a.services.SearchUsers(c.Request.Context(), userID.(string), query)
+	if err != nil {
+		c.JSON(friendErrorStatus(err), gin.H{"error": "user search failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+func (a *App) listFriendsHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "friend service unavailable"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	friends, err := a.services.ListFriends(c.Request.Context(), userID.(string))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "friend service unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"friends": friends})
+}
+
+func (a *App) listFriendRequestsHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "friend service unavailable"})
+		return
+	}
+	direction := strings.ToLower(strings.TrimSpace(c.DefaultQuery("direction", "incoming")))
+	if direction != "incoming" && direction != "outgoing" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "direction must be incoming or outgoing"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	requests, err := a.services.ListFriendRequests(c.Request.Context(), userID.(string), direction)
+	if err != nil {
+		c.JSON(friendErrorStatus(err), gin.H{"error": "friend request list failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"requests": requests})
+}
+
+func (a *App) sendFriendRequestHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "friend service unavailable"})
+		return
+	}
+	var payload struct {
+		RecipientID string `json:"recipient_id"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || strings.TrimSpace(payload.RecipientID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "recipient_id is required"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	request, err := a.services.SendFriendRequest(c.Request.Context(), userID.(string), payload.RecipientID)
+	if err != nil {
+		c.JSON(friendErrorStatus(err), gin.H{"error": "could not send friend request"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"request": request})
+}
+
+func (a *App) respondFriendRequestHandler(accept bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if a.services == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "friend service unavailable"})
+			return
+		}
+		userID, _ := c.Get("user_id")
+		request, err := a.services.RespondFriendRequest(c.Request.Context(), c.Param("id"), userID.(string), accept)
+		if err != nil {
+			c.JSON(friendErrorStatus(err), gin.H{"error": "could not update friend request"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"request": request})
+	}
+}
+
+func friendErrorStatus(err error) int {
+	switch status.Code(err) {
+	case codes.InvalidArgument:
+		return http.StatusBadRequest
+	case codes.PermissionDenied:
+		return http.StatusForbidden
+	case codes.NotFound:
+		return http.StatusNotFound
+	case codes.AlreadyExists, codes.FailedPrecondition:
+		return http.StatusConflict
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func (a *App) listConversationsHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	conversations, err := a.services.ListConversations(c.Request.Context(), userID.(string))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversations": conversations})
+}
+
+func (a *App) createConversationHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	var payload struct {
+		RecipientID string `json:"recipient_id"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || strings.TrimSpace(payload.RecipientID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "recipient_id is required"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	conversation, err := a.services.GetOrCreateDirectConversation(c.Request.Context(), userID.(string), payload.RecipientID)
+	if err != nil {
+		if status.Code(err) == codes.InvalidArgument {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recipient_id"})
+			return
+		}
+		if status.Code(err) == codes.PermissionDenied {
+			c.JSON(http.StatusForbidden, gin.H{"error": "recipient must be your friend"})
+			return
+		}
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "recipient not found"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	c.JSON(http.StatusOK, conversation)
+}
+
+func (a *App) listMessagesHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	limit := int64(50)
+	if value := c.Query("limit"); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || parsed < 1 || parsed > 100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be between 1 and 100"})
+			return
+		}
+		limit = parsed
+	}
+	userID, _ := c.Get("user_id")
+	currentUserID := userID.(string)
+	messages, err := a.services.ListMessages(c.Request.Context(), c.Param("id"), currentUserID, int32(limit))
+	if err != nil {
+		if status.Code(err) == codes.InvalidArgument {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid conversation ID"})
+			return
+		}
+		if status.Code(err) == codes.PermissionDenied {
+			c.JSON(http.StatusForbidden, gin.H{"error": "not a conversation member"})
+			return
+		}
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "conversation not found"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	for _, message := range messages {
+		if message.SenderID != currentUserID {
+			if err := a.services.MarkDelivered(c.Request.Context(), currentUserID, message.ID); err != nil {
+				c.JSON(http.StatusBadGateway, gin.H{"error": "failed to mark messages delivered"})
+				return
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"messages": messages})
+}
+
+func (a *App) markMessageDeliveredHandler(c *gin.Context) {
+	if a.services == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	userID, _ := c.Get("user_id")
+	if err := a.services.MarkDelivered(c.Request.Context(), userID.(string), c.Param("id")); err != nil {
+		if status.Code(err) == codes.InvalidArgument {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid message ID"})
+			return
+		}
+		if status.Code(err) == codes.NotFound {
+			c.JSON(http.StatusNotFound, gin.H{"error": "message delivery not found"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "chat service unavailable"})
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (a *App) unreadMessagesHandler(c *gin.Context) {
@@ -358,7 +586,13 @@ func (a *App) websocketPresenceHandler(c *gin.Context) {
 	upgrader := websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
-			return origin == "" || strings.EqualFold(origin, "https://"+r.Host) || strings.EqualFold(origin, "http://"+r.Host)
+			if origin == "" || strings.EqualFold(origin, "https://"+r.Host) || strings.EqualFold(origin, "http://"+r.Host) {
+				return true
+			}
+			if a.allowLocalWebSocketOrigins {
+				return strings.EqualFold(origin, "http://localhost:3000") || strings.EqualFold(origin, "http://127.0.0.1:3000")
+			}
+			return false
 		},
 	}
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
