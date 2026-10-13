@@ -23,7 +23,6 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
   const showFriendModal = useFriendModalStore((state) => state.show);
   const [conversations, setConversations] = useState<ApiConversation[]>([]);
   const [messages, setMessages] = useState<ApiMessage[]>([]);
-  const [messagesByConversation, setMessagesByConversation] = useState<Record<string, ApiMessage[]>>({});
   const [activeId, setActiveId] = useState<string | null>(initialConversationId ?? null);
   const [selfId, setSelfId] = useState('');
   const [search, setSearch] = useState('');
@@ -32,7 +31,7 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [participantPresence, setParticipantPresence] = useState<'online' | 'offline'>('offline');
+  const [participantPresence, setParticipantPresence] = useState<{ id: string; status: 'online' | 'offline' } | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const historyRequest = useRef(0);
   const active = conversations.find((item) => item.id === activeId);
@@ -40,15 +39,12 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
   // Conversation presence is only a snapshot; keep it fresh while the chat is open.
   useEffect(() => {
     const participantId = active?.participant?.id;
-    if (!participantId) {
-      setParticipantPresence('offline');
-      return;
-    }
+    if (!participantId) return;
     let live = true;
     const refreshPresence = () => {
       void api<UserPresence>(`/users/${encodeURIComponent(participantId)}/status`)
-        .then((result) => { if (live) setParticipantPresence(result.status === 'online' ? 'online' : 'offline'); })
-        .catch(() => { if (live) setParticipantPresence('offline'); });
+        .then((result) => { if (live) setParticipantPresence({ id: participantId, status: result.status === 'online' ? 'online' : 'offline' }); })
+        .catch(() => { if (live) setParticipantPresence({ id: participantId, status: 'offline' }); });
     };
     refreshPresence();
     const timer = window.setInterval(refreshPresence, 5_000);
@@ -57,21 +53,12 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
 
   const loadConversations = useCallback(async () => {
     const response = await api<{ conversations: ApiConversation[] }>('/chat/conversations');
-    const items = response.conversations ?? [];
-    setConversations(items);
-    return items;
+    return response.conversations ?? [];
   }, []);
 
   const loadMessages = useCallback(async (id: string) => {
-    const request = ++historyRequest.current;
-    setLoadingMessages(true);
-    try {
-      const response = await api<{ messages: ApiMessage[] }>(`/chat/conversations/${encodeURIComponent(id)}/messages?limit=50`);
-      if (request !== historyRequest.current) return;
-      const history = (response.messages ?? []).sort((a, b) => a.created_at.localeCompare(b.created_at));
-      setMessages(history);
-      setMessagesByConversation((items) => ({ ...items, [id]: history }));
-    } finally { if (request === historyRequest.current) setLoadingMessages(false); }
+    const response = await api<{ messages: ApiMessage[] }>(`/chat/conversations/${encodeURIComponent(id)}/messages?limit=50`);
+    return (response.messages ?? []).sort((a, b) => a.created_at.localeCompare(b.created_at));
   }, []);
 
   useEffect(() => {
@@ -79,6 +66,7 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
     api<{ id: string }>('/profile').then((profile) => { if (live) setSelfId(profile.id); }).catch(() => undefined);
     loadConversations().then((items) => {
       if (!live) return;
+      setConversations(items);
       if (initialConversationId) {
         setActiveId(initialConversationId);
         if (!items.some((item) => item.id === initialConversationId)) {
@@ -92,8 +80,27 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
   }, [initialConversationId, loadConversations]);
 
   useEffect(() => {
-    if (!activeId) { setMessages([]); return; }
-    loadMessages(activeId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : 'Không tải được tin nhắn.'));
+    if (!activeId) return;
+    let live = true;
+    const request = ++historyRequest.current;
+    void Promise.resolve()
+      .then(() => {
+        if (live) setLoadingMessages(true);
+        return loadMessages(activeId);
+      })
+      .then((history) => {
+        if (live && request === historyRequest.current) setMessages(history);
+      })
+      .catch((error: unknown) => {
+        if (live) toast.error(error instanceof Error ? error.message : 'Không tải được tin nhắn.');
+      })
+      .finally(() => {
+        if (live && request === historyRequest.current) setLoadingMessages(false);
+      });
+    return () => {
+      live = false;
+      historyRequest.current += 1;
+    };
   }, [activeId, loadMessages]);
 
   useEffect(() => {
@@ -104,7 +111,6 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
           const incoming = data.message;
           void api(`/chat/messages/${encodeURIComponent(incoming.id)}/delivered`, { method: 'POST' }).catch(() => undefined);
           setConversations((items) => items.map((item) => item.id === incoming.conversation_id ? { ...item, last_message: incoming, updated_at: incoming.created_at, unread_count: item.id === activeId ? 0 : item.unread_count + 1 } : item).sort((a, b) => b.updated_at.localeCompare(a.updated_at)));
-          setMessagesByConversation((items) => ({ ...items, [incoming.conversation_id]: [...(items[incoming.conversation_id] ?? []).filter((message) => message.id !== incoming.id && !(incoming.sender_id === selfId && message.id.startsWith('pending-'))), incoming] }));
           setConversations((items) => items.some((item) => item.id === incoming.conversation_id) ? items : [{ id: incoming.conversation_id, title: `Cuộc trò chuyện ${incoming.conversation_id.slice(0, 8)}`, participant: { id: incoming.sender_id, username: incoming.sender_id, display_name: incoming.sender_id }, updated_at: incoming.created_at, unread_count: 1 }, ...items]);
           if (incoming.conversation_id === activeId) {
             setMessages((items) => items.some((item) => item.id === incoming.id) ? items : [...items.filter((message) => !(incoming.sender_id === selfId && message.id.startsWith('pending-'))), incoming]);
@@ -114,12 +120,10 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
           setSending(false);
           if (activeId && data.message_id) {
             setMessages((items) => items.map((item) => item.id.startsWith('pending-') ? { ...item, id: data.message_id! } : item));
-            setMessagesByConversation((items) => ({ ...items, [activeId]: (items[activeId] ?? []).map((item) => item.id.startsWith('pending-') ? { ...item, id: data.message_id! } : item) }));
           }
         } else if (data.type === 'error') {
           setSending(false);
           setMessages((items) => items.filter((item) => !item.id.startsWith('pending-')));
-          if (activeId) setMessagesByConversation((items) => ({ ...items, [activeId]: (items[activeId] ?? []).filter((item) => !item.id.startsWith('pending-')) }));
           toast.error(data.error ?? 'Không gửi được tin nhắn.');
         }
       } catch { /* Ignore unrelated or malformed socket frames. */ }
@@ -142,15 +146,6 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
         }
         const grouped = new Map<string, ApiMessage[]>();
         for (const message of recovered) grouped.set(message.conversation_id, [...(grouped.get(message.conversation_id) ?? []), message]);
-        setMessagesByConversation((current) => {
-          const next = { ...current };
-          for (const [conversationId, incoming] of grouped) {
-            const merged = new Map((next[conversationId] ?? []).map((item) => [item.id, item]));
-            for (const item of incoming) merged.set(item.id, item);
-            next[conversationId] = [...merged.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
-          }
-          return next;
-        });
         if (activeId && grouped.has(activeId)) {
           setMessages((current) => {
             const merged = new Map(current.map((item) => [item.id, item]));
@@ -158,7 +153,8 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
             return [...merged.values()].sort((a, b) => a.created_at.localeCompare(b.created_at));
           });
         }
-        await loadConversations();
+        const items = await loadConversations();
+        setConversations(items);
       } catch { /* Reconnect recovery will retry on the next WebSocket open. */ }
     };
     const update = () => {
@@ -182,7 +178,9 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
   }, [activeId, loadConversations, loadMessages, selfId]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => { void loadConversations().catch(() => undefined); }, 10_000);
+    const timer = window.setInterval(() => {
+      void loadConversations().then(setConversations).catch(() => undefined);
+    }, 10_000);
     return () => window.clearInterval(timer);
   }, [loadConversations]);
 
@@ -201,7 +199,6 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
       });
       setConversations((items) => [conversation, ...items.filter((item) => item.id !== conversation.id)]);
       setMessages([]);
-      setMessagesByConversation((items) => ({ ...items, [conversation.id]: [] }));
       selectConversation(conversation.id);
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Không tạo được cuộc trò chuyện.'); }
   };
@@ -216,7 +213,6 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
     const optimistic: ApiMessage = { id: `pending-${Date.now()}`, conversation_id: activeId, sender_id: selfId, body, created_at: new Date().toISOString() };
     socket.send(JSON.stringify({ type: 'send_message', conversation_id: activeId, body }));
     setMessages((items) => [...items, optimistic]);
-    setMessagesByConversation((items) => ({ ...items, [activeId]: [...(items[activeId] ?? []), optimistic] }));
     setConversations((items) => items.map((item) => item.id === activeId ? { ...item, last_message: optimistic, updated_at: optimistic.created_at, unread_count: 0 } : item));
     setSending(true);
     setDraft('');
@@ -231,7 +227,7 @@ export function ChatWorkspace({ initialConversationId }: { initialConversationId
       <div className="flex-1 overflow-y-auto px-2 pb-3">{loadingConversations ? <p className="px-5 py-8 text-sm text-muted-foreground">Đang tải cuộc trò chuyện…</p> : visible.length ? visible.map((conversation) => <button key={conversation.id} onClick={() => selectConversation(conversation.id)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left ${activeId === conversation.id ? 'bg-primary/[0.08]' : 'hover:bg-muted/70'}`}><Avatar name={conversation.title || conversation.participant?.display_name || conversation.participant?.username || '?'} className="h-12 w-12"/><span className="min-w-0 flex-1"><span className="flex items-center justify-between gap-2"><span className="truncate text-sm font-semibold">{conversation.title || conversation.participant?.display_name || conversation.participant?.username}</span><time className="shrink-0 text-[10px] text-muted-foreground">{clock(conversation.updated_at)}</time></span><span className="mt-1 flex items-center justify-between gap-2"><span className="truncate text-xs text-muted-foreground">{conversation.last_message?.body ?? 'Chưa có tin nhắn'}</span>{conversation.unread_count > 0 && <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] text-primary-foreground">{conversation.unread_count}</span>}</span></span></button>) : <div className="px-5 py-12 text-center"><MessageCircle className="mx-auto h-7 w-7 text-muted-foreground/70"/><p className="mt-3 text-sm text-muted-foreground">{search ? 'Không tìm thấy cuộc trò chuyện' : 'Chưa có cuộc trò chuyện nào'}</p></div>}</div>
     </aside>
     <section className={`min-w-0 flex-1 flex-col bg-muted/20 ${active ? 'flex' : 'hidden md:flex'}`}>
-      {active ? <><header className="flex h-[76px] shrink-0 items-center gap-3 border-b bg-background px-3 sm:px-6"><Button variant="ghost" size="icon" className="md:hidden" aria-label="Quay lại danh sách" onClick={() => { setActiveId(null); router.push('/chat'); }}><ArrowLeft className="h-5 w-5"/></Button><Avatar name={active.title || active.participant?.display_name || active.participant?.username || '?'} className="h-11 w-11"/><div className="min-w-0 flex-1"><h2 className="truncate font-semibold">{active.title || active.participant?.display_name || active.participant?.username}</h2><p className="truncate text-xs text-muted-foreground">{participantPresence === 'online' ? 'Đang online' : 'Offline'}</p></div><span className="text-xs text-muted-foreground">{connected ? 'Trực tuyến' : 'Đang kết nối…'}</span></header>
+      {active ? <><header className="flex h-[76px] shrink-0 items-center gap-3 border-b bg-background px-3 sm:px-6"><Button variant="ghost" size="icon" className="md:hidden" aria-label="Quay lại danh sách" onClick={() => { setActiveId(null); router.push('/chat'); }}><ArrowLeft className="h-5 w-5"/></Button><Avatar name={active.title || active.participant?.display_name || active.participant?.username || '?'} className="h-11 w-11"/><div className="min-w-0 flex-1"><h2 className="truncate font-semibold">{active.title || active.participant?.display_name || active.participant?.username}</h2><p className="truncate text-xs text-muted-foreground">{participantPresence?.id === active.participant.id && participantPresence.status === 'online' ? 'Đang online' : 'Offline'}</p></div><span className="text-xs text-muted-foreground">{connected ? 'Trực tuyến' : 'Đang kết nối…'}</span></header>
         <div className="flex-1 overflow-y-auto px-4 sm:px-8"><div className="mx-auto flex min-h-full max-w-3xl flex-col justify-end py-6"><div className="space-y-1">{loadingMessages ? <p className="py-8 text-center text-sm text-muted-foreground">Đang tải tin nhắn…</p> : messages.map((message, index) => { const mine = message.sender_id === selfId; const previous = messages[index - 1]; return <div key={message.id} className={`flex ${mine ? 'justify-end' : 'justify-start'} ${previous?.sender_id === message.sender_id ? 'mt-1' : 'mt-4'}`}><div className={`max-w-[84%] rounded-2xl px-3.5 py-2.5 sm:max-w-[72%] ${mine ? 'rounded-br-md bg-primary text-primary-foreground' : 'rounded-bl-md border bg-background shadow-sm'}`}><p className="whitespace-pre-wrap break-words text-sm leading-5">{message.body}</p><div className={`mt-1 flex items-center justify-end gap-1 text-[10px] ${mine ? 'text-primary-foreground/70' : 'text-muted-foreground'}`}><time>{clock(message.created_at)}</time>{mine && !message.id.startsWith('pending-') && <Check className="h-3 w-3"/>}</div></div></div>; })}</div><div ref={endRef}/></div></div>
         <form className="shrink-0 border-t bg-background p-3 sm:px-6 sm:py-4" onSubmit={sendMessage}><div className="mx-auto flex max-w-3xl items-end gap-2 rounded-2xl border bg-muted/50 p-2"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={onKeyDown} rows={1} placeholder="Aa · nhập tin nhắn" className="max-h-32 min-h-10 flex-1 resize-y bg-transparent px-2 py-2.5 text-sm outline-none placeholder:text-muted-foreground"/><Button type="submit" size="icon" className="h-10 w-10 shrink-0 rounded-xl" aria-label="Gửi tin nhắn" disabled={!draft.trim() || sending || !connected}><Send className="h-4 w-4"/></Button></div></form>
       </> : <div className="m-auto hidden max-w-sm flex-col items-center px-6 text-center md:flex"><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 text-primary"><MessageCircle className="h-7 w-7"/></div><h2 className="mt-5 text-lg font-semibold">Chọn một cuộc trò chuyện</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Chọn hội thoại ở danh sách để xem tin nhắn.</p></div>}

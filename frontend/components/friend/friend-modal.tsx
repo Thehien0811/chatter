@@ -38,10 +38,18 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
 
   useEffect(() => {
     if (!open) return;
-    setLoading(true);
-    Promise.all([loadFriends(), loadRequests()])
-      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : 'Không tải được dữ liệu bạn bè.'))
-      .finally(() => setLoading(false));
+    let live = true;
+    void Promise.resolve()
+      .then(() => {
+        if (!live) return;
+        setLoading(true);
+        return Promise.all([loadFriends(), loadRequests()]);
+      })
+      .catch((error: unknown) => {
+        if (live) toast.error(error instanceof Error ? error.message : 'Không tải được dữ liệu bạn bè.');
+      })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
   }, [open]);
 
   useEffect(() => {
@@ -60,7 +68,7 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
   useEffect(() => {
     if (!open || tab !== 'add') return;
     const value = query.trim();
-    if (value.length < 2) { setResults([]); return; }
+    if (value.length < 2) return;
     let live = true;
     const timer = window.setTimeout(() => {
       api<{ users: Friend[] }>(`/users/search?q=${encodeURIComponent(value)}`)
