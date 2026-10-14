@@ -1,54 +1,77 @@
-
-name: Frontend CI
+name: CI/CD Next.js → Render
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/frontend.yml"
   push:
     branches: [main]
-    paths:
-      - "frontend/**"
-      - ".github/workflows/frontend.yml"
-  workflow_dispatch:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
-concurrency:
-  group: frontend-ci-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  check:
-    name: Lint, Typecheck and Build
+  ci:
+    name: CI (Docker)
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        working-directory: frontend
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lint và test trong Docker
+        uses: docker/build-push-action@v6
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          context: .
+          target: ci
+          push: false
+          cache-from: type=gha,scope=ci
+          cache-to: type=gha,scope=ci,mode=max
 
-      - name: Install dependencies
-        run: npm ci
+  build-push:
+    name: Build và push image
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tên image (chữ thường)
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runner
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+          tags: |
+            ${{ steps.name.outputs.image }}:latest
+            ${{ steps.name.outputs.image }}:${{ github.sha }}
+          cache-from: type=gha,scope=build
+          cache-to: type=gha,scope=build,mode=max
 
-      - name: Lint
-        run: npm run lint
-
-      - name: TypeScript check
-        run: npx tsc --noEmit
-
-      - name: Build Next.js
-        run: npm run build
+  deploy:
+    name: Deploy lên Render
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Gọi Render deploy hook
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          IMAGE: ${{ needs.build-push.outputs.image }}:${{ github.sha }}
+        run: |
+          curl -fsS -G "$HOOK" --data-urlencode "imgURL=$IMAGE"
