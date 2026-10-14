@@ -21,6 +21,10 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 RUN npm run build
 
+# CI validation
+FROM builder AS ci
+RUN npm run lint
+
 # Production runtime
 FROM base AS runner
 WORKDIR /app

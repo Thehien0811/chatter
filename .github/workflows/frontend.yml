@@ -23,7 +23,7 @@ jobs:
       - name: Lint và test trong Docker
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./frontend
           target: ci
           push: false
           cache-from: type=gha,scope=ci
@@ -52,7 +52,7 @@ jobs:
         run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./frontend
           target: runner
           push: true
           build-args: |
