@@ -28,6 +28,8 @@ Tài liệu này mô tả API mà API Gateway hiện khai báo trong Gin router 
 | `POST` | `/api/v1/chat/messages/:id/delivered` | JWT Bearer + Casbin | Đánh dấu tin nhắn đã giao cho user hiện tại |
 | `GET` | `/api/v1/chat/unread` | JWT Bearer + Casbin | Đọc tin nhắn đang chờ giao và đánh dấu delivered |
 | `GET` | `/api/v1/ws/presence` | JWT + Casbin; nâng cấp thành WebSocket | Presence và gửi/nhận realtime qua Redis Pub/Sub |
+| `POST` | `/api/v1/chat/images` | JWT + Casbin | Upload ảnh tin nhắn, giới hạn 10 MB |
+| `GET` | `/api/v1/media/:id` | JWT + Casbin | Đọc ảnh nếu là thành viên hội thoại chứa ảnh |
 | `PATCH` | `/api/v1/profile` | JWT Bearer | Route có handler nhưng policy Casbin chưa cho phép, hiện trả `403` |
 | `GET` | `/api/v1/admin/users` | Admin | Scaffold; hiện trả danh sách cố định `alice`, `bob`, `charlie` |
 
@@ -196,6 +198,12 @@ Authorization: Bearer <access_token>
 
 Trả `{ "messages": [...] }` theo thứ tự mới nhất trước; frontend sắp xếp theo `created_at` để hiển thị cũ trước. Limit mặc định `50`, giới hạn `1..100`. Chỉ thành viên đang hoạt động được đọc; thành viên khác nhận `403`. Khi đọc history, Gateway đánh dấu các tin nhắn do người khác gửi là delivered. Client cũng có thể báo delivered ngay khi nhận realtime bằng `POST /api/v1/chat/messages/<message-id>/delivered` với JWT.
 
+### Gửi và đọc ảnh
+
+Upload ảnh dùng `multipart/form-data` với `conversation_id` và file field `file` tại `POST /api/v1/chat/images`. Chỉ chấp nhận ảnh JPEG, PNG, GIF hợp lệ; giới hạn 10 MB được kiểm tra ở Gateway và Chat Service. Object được lưu trong private MinIO bucket; metadata, message ảnh và attachment được ghi vào Postgres.
+
+Attachment URL yêu cầu JWT tại `GET /api/v1/media/:id` và chỉ đọc được bởi thành viên hội thoại chứa ảnh. Bucket MinIO không được public.
+
 ### Tin nhắn chưa nhận
 
 ```http
@@ -259,6 +267,8 @@ Gateway lấy `sender_id` từ JWT, không nhận sender ID từ client. Frame k
 
 Chat Service xác thực sender là thành viên đang hoạt động của hội thoại, commit tin nhắn và bản ghi delivery trong Postgres rồi publish event lên `chat:user:<recipient-id>`. Mọi gateway subscribe theo user đang kết nối và chuyển event tới WebSocket cục bộ. Pub/Sub dùng cho realtime; endpoint unread khôi phục tin khi client offline hoặc bỏ lỡ event. Khi Redis không có presence key của người nhận, Chat Service đồng thời publish JSON bền vững vào RabbitMQ queue `notification` để worker push/email xử lý. Hiện chưa có worker FCM/APNs/email trong project.
 
+Call signaling dùng envelope `{ "type": string, "payload": object, "ts": number }` với các event `call.invite`, `call.accept`, `call.reject`, `call.offer`, `call.answer`, `call.ice` và `call.end`. Server relay event qua Redis channel `call:user:<user-id>`. `call.invite` gồm `callId`, `conversationId`, `callType` (`audio` hoặc `video`); sender ID do Gateway lấy từ JWT và thêm dưới `from`. Gateway kiểm tra membership hội thoại, friendship đã chấp nhận và presence online của người nhận; mỗi user chỉ có một call đồng thời. Client giữ session bằng `call.heartbeat` mỗi 12 giây; Redis session lease là 45 giây. SDP/ICE chỉ relay, không lưu DB. Audio/video đi peer-to-peer; production cần STUN/TURN endpoint truy cập được từ browser.
+
 ## Error response
 
 REST lỗi thường có dạng:
@@ -303,6 +313,8 @@ Auth gọi User Service để xác minh password. Access token hiện có TTL 2 
 Proto khai báo các RPC:
 
 - `SendMessage(SendMessageRequest{conversation_id,sender_id,body}) -> SendMessageResponse{message_id,success}`
+- `SendImageMessage(SendImageMessageRequest{conversation_id,sender_id,media_id,storage_key,media_type,byte_size}) -> SendImageMessageResponse{message}`
+- `GetMediaObject(GetMediaObjectRequest{media_id,user_id}) -> GetMediaObjectResponse{storage_key,media_type,byte_size}`
 - `GetOrCreateDirectConversation(GetOrCreateDirectConversationRequest{user_id,recipient_id}) -> Conversation`
 - `ListConversations(ListConversationsRequest{user_id}) -> ListConversationsResponse{conversations}`
 - `ListMessages(ListMessagesRequest{conversation_id,user_id,limit}) -> ListMessagesResponse{messages}`
@@ -311,6 +323,6 @@ Proto khai báo các RPC:
 
 Các RPC được triển khai để gửi tin, liệt kê message ID, đọc unread inbox và đánh dấu giao nhận. `ListMessages` hiện chỉ trả ID tin nhắn và chưa đủ thông tin caller để làm API lịch sử an toàn; Gateway chưa expose RPC này. Conversation list/create và full history chưa có trong proto/API.
 
-### FriendService và CallService
+### FriendService và Call signaling
 
-Hiện chỉ có gRPC health service. Chưa có proto/API nghiệp vụ cho friend request, danh sách bạn, signaling cuộc gọi hoặc lịch sử call.
+FriendService cung cấp lời mời kết bạn, danh sách bạn, tìm kiếm user và kiểm tra friendship qua gRPC. Call signaling hiện được Gateway relay qua WebSocket/Redis; `call-service` chưa ghi lịch sử vào bảng `calls`.

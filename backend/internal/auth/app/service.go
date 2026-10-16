@@ -101,6 +101,8 @@ func NewCasbinService() *CasbinService {
 	_, _ = enforcer.AddPolicy("user", "/api/v1/chat/conversations", "GET")
 	_, _ = enforcer.AddPolicy("user", "/api/v1/chat/conversations", "POST")
 	_, _ = enforcer.AddPolicy("user", "/api/v1/chat/conversations/:id/messages", "GET")
+	_, _ = enforcer.AddPolicy("user", "/api/v1/chat/images", "POST")
+	_, _ = enforcer.AddPolicy("user", "/api/v1/media/:id", "GET")
 	_, _ = enforcer.AddPolicy("user", "/api/v1/chat/messages/:id/delivered", "POST")
 	_, _ = enforcer.AddPolicy("user", "/api/v1/ws/presence", "GET")
 	_, _ = enforcer.AddPolicy("admin", "/api/v1/admin/*", "GET")

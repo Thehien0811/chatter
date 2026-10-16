@@ -1,6 +1,7 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, MessageCircle, Search, UserPlus, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useFriendModalStore } from '@/hooks/use-friend-modal-store';
@@ -9,24 +10,41 @@ import { addSocketMessageListener } from '@/lib/websocket-client';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { PresenceIndicator } from '@/components/friend/presence-indicator';
+import type { Friend } from '@/types/friend';
 
-type Friend = { id: string; username: string; display_name: string };
 type Request = { id: string; from_user: Friend; to_user: Friend; created_at: string };
 
-export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Friend) => void }) {
+export function FriendModal({ onSelectFriend, socketConnected }: { onSelectFriend?: (friend: Friend) => void; socketConnected: boolean }) {
   const { open, tab, close, setTab } = useFriendModalStore();
+  const queryClient = useQueryClient();
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Friend[]>([]);
-  const [friends, setFriends] = useState<Friend[]>([]);
   const [incoming, setIncoming] = useState<Request[]>([]);
   const [outgoing, setOutgoing] = useState<Request[]>([]);
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState('');
 
-  const loadFriends = async () => {
+  const loadFriends = useCallback(async () => {
     const response = await api<{ friends: Friend[] }>('/friends');
-    setFriends(response.friends ?? []);
-  };
+    const latest = response.friends ?? [];
+    const cached = queryClient.getQueryData<Friend[]>(['friends']) ?? [];
+    return latest.map((friend) => {
+      const previous = cached.find((item) => item.id === friend.id);
+      return previous && (previous.presence_version ?? -1) > (friend.presence_version ?? -1)
+        ? { ...friend, presence: previous.presence, presence_version: previous.presence_version }
+        : friend;
+    });
+  }, [queryClient]);
+  const friendsQuery = useQuery({
+    queryKey: ['friends'],
+    queryFn: loadFriends,
+    enabled: open,
+    staleTime: 15_000,
+    refetchInterval: open ? 30_000 : false,
+  });
+  const friends = friendsQuery.data ?? [];
   const loadRequests = async () => {
     const [inResponse, outResponse] = await Promise.all([
       api<{ requests: Request[] }>('/friend-requests?direction=incoming'),
@@ -43,7 +61,7 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
       .then(() => {
         if (!live) return;
         setLoading(true);
-        return Promise.all([loadFriends(), loadRequests()]);
+        return loadRequests();
       })
       .catch((error: unknown) => {
         if (live) toast.error(error instanceof Error ? error.message : 'Không tải được dữ liệu bạn bè.');
@@ -57,13 +75,18 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
     return addSocketMessageListener((event) => {
       try {
         const data = JSON.parse(event.data) as { type?: string };
-        if (!data.type?.startsWith('friend.')) return;
-        void Promise.all([loadFriends(), loadRequests()]).catch(() => undefined);
+        if (data.type !== 'friend.request' && data.type !== 'friend.accepted') return;
+        void Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['friends'] }),
+          loadRequests(),
+        ]).catch((error: unknown) => {
+          toast.error(error instanceof Error ? error.message : 'Không cập nhật được danh sách bạn bè.');
+        });
         if (data.type === 'friend.request') toast.info('Bạn nhận được lời mời kết bạn mới.');
         if (data.type === 'friend.accepted') toast.success('Lời mời kết bạn đã được chấp nhận.');
       } catch { /* Ignore unrelated or malformed socket frames. */ }
     });
-  }, [open]);
+  }, [open, queryClient]);
 
   useEffect(() => {
     if (!open || tab !== 'add') return;
@@ -91,7 +114,7 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
     setBusyId(request.id);
     try {
       await api(`/friend-requests/${encodeURIComponent(request.id)}/${action}`, { method: 'POST' });
-      await Promise.all([loadFriends(), loadRequests()]);
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ['friends'] }), loadRequests()]);
       if (action === 'accept') toast.success('Đã chấp nhận lời mời kết bạn.');
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Không cập nhật được lời mời.'); }
     finally { setBusyId(''); }
@@ -101,8 +124,8 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
 
   return <Dialog.Root open={open} onOpenChange={(next) => { if (!next) close(); }}><Dialog.Portal>
     <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"/>
-    <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[85dvh] w-[min(94vw,500px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border bg-background p-5 shadow-2xl sm:p-6">
-      <div className="flex items-start justify-between"><div><Dialog.Title className="text-xl font-semibold">Bạn bè</Dialog.Title><Dialog.Description className="mt-1 text-sm text-muted-foreground">Kết nối với bạn bè để bắt đầu trò chuyện.</Dialog.Description></div><Dialog.Close asChild><Button variant="ghost" size="icon" aria-label="Đóng"><X className="h-4 w-4"/></Button></Dialog.Close></div>
+    <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[85dvh] w-[min(94vw,500px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-3xl border border-primary/10 bg-card p-5 shadow-2xl sm:p-6">
+      <div className="flex items-start justify-between"><div><Dialog.Title className="text-xl font-semibold">Bạn bè</Dialog.Title><Dialog.Description className="mt-1 text-sm text-muted-foreground">Kết nối với mọi người trên Chatter.</Dialog.Description></div><Dialog.Close asChild><Button variant="ghost" size="icon" aria-label="Đóng"><X className="h-4 w-4"/></Button></Dialog.Close></div>
       <div className="mt-5 grid grid-cols-3 rounded-xl bg-muted p-1 text-sm">
         {([['add', 'Tìm bạn'], ['received', `Lời mời${incoming.length ? ` (${incoming.length})` : ''}`], ['friends', `Bạn bè (${friends.length})`]] as const).map(([key, label]) => <button key={key} onClick={() => setTab(key)} className={`rounded-lg px-2 py-2 ${tab === key ? 'bg-background font-medium shadow-sm' : 'text-muted-foreground'}`}>{label}</button>)}
       </div>
@@ -115,7 +138,14 @@ export function FriendModal({ onSelectFriend }: { onSelectFriend?: (friend: Frie
       </div> : tab === 'received' ? <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
         {loading ? <p className="py-8 text-center text-sm text-muted-foreground">Đang tải lời mời…</p> : incoming.length ? incoming.map((request) => <div key={request.id} className="flex items-center gap-3 border-b py-3 last:border-0"><Avatar name={request.from_user.display_name || request.from_user.username} className="h-10 w-10"/><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{request.from_user.display_name || request.from_user.username}</p><p className="truncate text-xs text-muted-foreground">@{request.from_user.username}</p></div><Button size="sm" disabled={busyId === request.id} onClick={() => void respond(request, 'accept')}><Check className="mr-1.5 h-4 w-4"/>Chấp nhận</Button><Button size="sm" variant="ghost" disabled={busyId === request.id} onClick={() => void respond(request, 'reject')}>Từ chối</Button></div>) : <p className="py-8 text-center text-sm text-muted-foreground">Bạn chưa có lời mời kết bạn nào.</p>}
       </div> : <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
-        {loading ? <p className="py-8 text-center text-sm text-muted-foreground">Đang tải danh sách bạn bè…</p> : friends.length ? friends.map((friend) => <div key={friend.id} className="flex items-center gap-3 border-b py-3 last:border-0"><Avatar name={friend.display_name || friend.username} className="h-10 w-10"/><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{friend.display_name || friend.username}</p><p className="truncate text-xs text-muted-foreground">@{friend.username}</p></div>{onSelectFriend && <Button size="sm" variant="outline" onClick={() => { close(); onSelectFriend(friend); }}><MessageCircle className="mr-1.5 h-4 w-4"/>Nhắn tin</Button>}</div>) : <p className="py-8 text-center text-sm text-muted-foreground">Chưa có bạn bè. Tìm và gửi lời mời kết bạn.</p>}
+        {friendsQuery.isPending ? <div className="space-y-3 py-3">{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className="h-14 rounded-xl"/>)}</div> : friends.length ? friends.map((friend) => {
+          const presence = socketConnected ? friend.presence ?? 'unknown' : 'unknown';
+          return <div key={friend.id} className="flex items-center gap-3 rounded-2xl px-2 py-3 transition-colors hover:bg-secondary/70">
+            <span className="relative"><Avatar name={friend.display_name || friend.username} className="h-11 w-11"/><i aria-hidden="true" className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-2 border-card ${presence === 'offline' ? 'bg-presence-offline' : 'bg-presence-online'}`}/></span>
+            <div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{friend.display_name || friend.username}</p><p className="truncate text-xs text-muted-foreground">@{friend.username}</p><PresenceIndicator status={presence} className="mt-1"/></div>
+            {onSelectFriend && <Button size="sm" variant="secondary" className="rounded-full" onClick={() => { close(); onSelectFriend(friend); }}><MessageCircle className="mr-1.5 h-4 w-4"/>Nhắn tin</Button>}
+          </div>;
+        }) : <p className="py-8 text-center text-sm text-muted-foreground">Chưa có bạn bè. Tìm và gửi lời mời kết bạn.</p>}
       </div>}
     </Dialog.Content>
   </Dialog.Portal></Dialog.Root>;

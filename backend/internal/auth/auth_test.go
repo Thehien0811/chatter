@@ -37,6 +37,14 @@ func TestCasbinEnforcer_AllowRoleBasedAccess(t *testing.T) {
 		t.Fatalf("expected user to be denied admin access, got ok=%v err=%v", ok, err)
 	}
 
+	if ok, err := enforcer.Enforce("user", "/api/v1/chat/images", "POST"); err != nil || !ok {
+		t.Fatalf("expected user to upload a chat image, got ok=%v err=%v", ok, err)
+	}
+
+	if ok, err := enforcer.Enforce("user", "/api/v1/media/00000000-0000-4000-8000-000000000001", "GET"); err != nil || !ok {
+		t.Fatalf("expected user to request an image, got ok=%v err=%v", ok, err)
+	}
+
 	if ok, err := enforcer.Enforce("admin", "/api/v1/admin/users", "GET"); err != nil || !ok {
 		t.Fatalf("expected admin to access admin users, got ok=%v err=%v", ok, err)
 	}

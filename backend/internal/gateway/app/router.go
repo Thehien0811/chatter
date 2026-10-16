@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
 	"github.com/thehien0811/chatter/config"
@@ -30,6 +32,8 @@ type App struct {
 	secret                     string
 	allowLocalWebSocketOrigins bool
 	hub                        *websocketHub
+	objects                    *objectStorage
+	objectStorageErr           error
 }
 
 func NewApp(secret string) *App {
@@ -51,6 +55,13 @@ func NewApp(secret string) *App {
 	authUC := usecase.NewAuthUseCase(jwtSvc, casbinSvc)
 	redisClient := app.NewRedisClient(cfg)
 	services, _ := NewServiceClients(cfg)
+	objects, objectStorageErr := newObjectStorage(
+		cfg.MinIO.Endpoint, cfg.MinIO.AccessKey, cfg.MinIO.SecretKey,
+		cfg.MinIO.Bucket, cfg.MinIO.Secure,
+	)
+	if objectStorageErr != nil {
+		log.Printf("image storage unavailable: %v", objectStorageErr)
+	}
 
 	gateway := &App{
 		engine:                     gin.Default(),
@@ -62,6 +73,8 @@ func NewApp(secret string) *App {
 		secret:                     secret,
 		allowLocalWebSocketOrigins: strings.EqualFold(cfg.App.Env, "development"),
 		hub:                        newWebsocketHub(redisClient),
+		objects:                    objects,
+		objectStorageErr:           objectStorageErr,
 	}
 	gateway.registerRoutes()
 	return gateway
@@ -96,6 +109,8 @@ func (a *App) registerRoutes() {
 	protected.GET("/chat/conversations", a.listConversationsHandler)
 	protected.POST("/chat/conversations", a.createConversationHandler)
 	protected.GET("/chat/conversations/:id/messages", a.listMessagesHandler)
+	protected.POST("/chat/images", a.uploadImageMessageHandler)
+	protected.GET("/media/:id", a.getMediaHandler)
 	protected.POST("/chat/messages/:id/delivered", a.markMessageDeliveredHandler)
 	protected.PATCH("/profile", a.updateProfileHandler)
 	protected.GET("/users/:id", a.userProfileHandler)
@@ -181,12 +196,34 @@ func (a *App) handleSocketMessage(ctx context.Context, userID string, conn *webs
 		return errors.New("chat service unavailable")
 	}
 	var request struct {
-		Type           string `json:"type"`
-		ConversationID string `json:"conversation_id"`
-		Body           string `json:"body"`
+		Type           string          `json:"type"`
+		ConversationID string          `json:"conversation_id"`
+		Body           string          `json:"body"`
+		Payload        json.RawMessage `json:"payload"`
 	}
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return err
+	}
+	if strings.HasPrefix(request.Type, "call.") {
+		if err := a.handleCallSignal(ctx, userID, payload); err != nil {
+			log.Printf("reject call signaling event %s: %v", request.Type, err)
+			var callPayload struct {
+				CallID string `json:"callId"`
+			}
+			if err := json.Unmarshal(request.Payload, &callPayload); err != nil {
+				log.Printf("read rejected call signaling payload: %v", err)
+			}
+			response, _ := json.Marshal(gin.H{
+				"type": "call.error",
+				"payload": gin.H{
+					"callId": callPayload.CallID,
+					"error":  "call is unavailable or permission was denied",
+				},
+				"ts": time.Now().UnixMilli(),
+			})
+			return a.hub.writeConnection(conn, response)
+		}
+		return nil
 	}
 	if request.Type != "send_message" || request.ConversationID == "" || request.Body == "" {
 		return errors.New("invalid message")
@@ -229,7 +266,19 @@ func (a *App) listFriendsHandler(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "friend service unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"friends": friends})
+	result := make([]gin.H, 0, len(friends))
+	for _, friend := range friends {
+		presence, presenceErr := a.getUserPresence(c.Request.Context(), friend.ID)
+		if presenceErr != nil {
+			log.Printf("read presence while listing friends: %v", presenceErr)
+			presence.Status = "unknown"
+		}
+		result = append(result, gin.H{
+			"id": friend.ID, "username": friend.Username, "display_name": friend.DisplayName,
+			"presence": presence.Status, "presence_version": presence.Version,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"friends": result})
 }
 
 func (a *App) listFriendRequestsHandler(c *gin.Context) {
@@ -314,7 +363,25 @@ func (a *App) listConversationsHandler(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "chat service unavailable"})
 		return
 	}
+	a.enrichConversationPresence(c.Request.Context(), conversations)
 	c.JSON(http.StatusOK, gin.H{"conversations": conversations})
+}
+
+func (a *App) enrichConversationPresence(ctx context.Context, conversations []ChatConversation) {
+	for index := range conversations {
+		a.enrichOneConversationPresence(ctx, &conversations[index])
+	}
+}
+
+func (a *App) enrichOneConversationPresence(ctx context.Context, conversation *ChatConversation) {
+	presence, err := a.getUserPresence(ctx, conversation.Participant.ID)
+	if err != nil {
+		log.Printf("read conversation participant presence: %v", err)
+		conversation.Participant.Presence = "unknown"
+		return
+	}
+	conversation.Participant.Presence = presence.Status
+	conversation.Participant.PresenceVersion = presence.Version
 }
 
 func (a *App) createConversationHandler(c *gin.Context) {
@@ -347,6 +414,7 @@ func (a *App) createConversationHandler(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "chat service unavailable"})
 		return
 	}
+	a.enrichOneConversationPresence(c.Request.Context(), conversation)
 	c.JSON(http.StatusOK, conversation)
 }
 
@@ -558,10 +626,14 @@ func (a *App) updateProfileHandler(c *gin.Context) {
 
 func (a *App) userStatusHandler(c *gin.Context) {
 	userID := c.Param("id")
-	status := a.getUserPresence(userID)
+	presence, err := a.getUserPresence(c.Request.Context(), userID)
+	if err != nil {
+		log.Printf("read user presence: %v", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "presence service unavailable"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"user_id": userID,
-		"status":  status,
+		"user_id": userID, "status": presence.Status, "version": presence.Version,
 	})
 }
 
@@ -601,72 +673,94 @@ func (a *App) websocketPresenceHandler(c *gin.Context) {
 	}
 	defer conn.Close()
 	userID := claims.UserID
-	if err := a.setUserPresence(userID, "online", 30*time.Second); err != nil {
-		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "presence update failed"))
-		return
-	}
 	unregister, err := a.hub.register(userID, conn)
 	if err != nil {
-		_ = a.setUserPresence(userID, "offline", time.Second)
 		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "message service unavailable"))
 		return
 	}
+	connectionID := uuid.NewString()
+	version, err := a.updatePresenceConnection(c.Request.Context(), userID, connectionID, true)
+	if err != nil {
+		unregister()
+		_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "presence update failed"))
+		return
+	}
+	if err := a.publishPresenceVersion(c.Request.Context(), userID, "online", version); err != nil {
+		log.Printf("publish user online presence: %v", err)
+	}
 	defer func() {
 		unregister()
-		if !a.hub.hasUser(userID) {
-			_ = a.setUserPresence(userID, "offline", time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		version, err := a.updatePresenceConnection(ctx, userID, connectionID, false)
+		if err != nil {
+			log.Printf("remove websocket presence lease: %v", err)
+			return
+		}
+		if err := a.publishPresenceVersion(ctx, userID, "offline", version); err != nil {
+			log.Printf("publish user offline presence: %v", err)
 		}
 	}()
 
-	ticker := time.NewTicker(20 * time.Second)
+	conn.SetReadLimit(64 * 1024)
+	if err := conn.SetReadDeadline(time.Now().Add(presenceLeaseTTL)); err != nil {
+		return
+	}
+	conn.SetPongHandler(func(string) error {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		version, err := a.updatePresenceConnection(ctx, userID, connectionID, true)
+		if err != nil {
+			return err
+		}
+		if err := a.publishPresenceVersion(ctx, userID, "online", version); err != nil {
+			log.Printf("publish refreshed online presence: %v", err)
+		}
+		return conn.SetReadDeadline(time.Now().Add(presenceLeaseTTL))
+	})
+
+	done := make(chan struct{})
+	defer close(done)
+	ticker := time.NewTicker(websocketPingInterval)
 	defer ticker.Stop()
-	readDone := make(chan struct{})
 	go func() {
-		defer close(readDone)
-		conn.SetReadLimit(64 * 1024)
 		for {
-			_, payload, err := conn.ReadMessage()
-			if err != nil {
+			select {
+			case <-ticker.C:
+				if err := a.hub.writeControl(userID, conn, websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+					_ = conn.Close()
+					return
+				}
+			case <-done:
 				return
-			}
-			_ = a.setUserPresence(userID, "online", 30*time.Second)
-			if err := a.handleSocketMessage(c.Request.Context(), userID, conn, payload); err != nil {
-				message, _ := json.Marshal(gin.H{"type": "error", "error": "message could not be sent"})
-				a.hub.writeConnection(conn, message)
 			}
 		}
 	}()
 	for {
-		select {
-		case <-ticker.C:
-			if err := a.setUserPresence(userID, "online", 30*time.Second); err != nil {
-				return
-			}
-		case <-readDone:
+		_, payload, err := conn.ReadMessage()
+		if err != nil {
 			return
 		}
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		version, err := a.updatePresenceConnection(ctx, userID, connectionID, true)
+		cancel()
+		if err != nil {
+			log.Printf("refresh websocket presence lease: %v", err)
+			return
+		}
+		if err := a.publishPresenceVersion(c.Request.Context(), userID, "online", version); err != nil {
+			log.Printf("publish refreshed online presence: %v", err)
+		}
+		if err := conn.SetReadDeadline(time.Now().Add(presenceLeaseTTL)); err != nil {
+			return
+		}
+		if err := a.handleSocketMessage(c.Request.Context(), userID, conn, payload); err != nil {
+			message, _ := json.Marshal(gin.H{"type": "error", "error": "message could not be sent"})
+			if err := a.hub.writeConnection(conn, message); err != nil {
+				return
+			}
+		}
 	}
-}
-
-func (a *App) setUserPresence(userID, status string, ttl time.Duration) error {
-	if a.redisClient == nil {
-		return nil
-	}
-	if status == "online" {
-		return a.redisClient.Set(context.Background(), "presence:user:"+userID, "online", ttl).Err()
-	}
-	return a.redisClient.Del(context.Background(), "presence:user:"+userID).Err()
-}
-
-func (a *App) getUserPresence(userID string) string {
-	if a.redisClient == nil {
-		return "offline"
-	}
-	value, err := a.redisClient.Get(context.Background(), "presence:user:"+userID).Result()
-	if err != nil || value == "" {
-		return "offline"
-	}
-	return value
 }
 
 func (a *App) userProfileHandler(c *gin.Context) {

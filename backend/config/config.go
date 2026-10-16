@@ -44,6 +44,13 @@ type AppConfig struct {
 		ChatURL   string `mapstructure:"chat_url"`
 		CallURL   string `mapstructure:"call_url"`
 	} `mapstructure:"services"`
+	MinIO struct {
+		Endpoint  string `mapstructure:"endpoint"`
+		AccessKey string `mapstructure:"access_key"`
+		SecretKey string `mapstructure:"secret_key"`
+		Bucket    string `mapstructure:"bucket"`
+		Secure    bool   `mapstructure:"secure"`
+	} `mapstructure:"minio"`
 }
 
 func (c *AppConfig) DSN() string {
@@ -90,6 +97,9 @@ func Load() (*AppConfig, error) {
 	v.SetDefault("services.friend_url", "localhost:9002")
 	v.SetDefault("services.chat_url", "localhost:9003")
 	v.SetDefault("services.call_url", "localhost:9004")
+	v.SetDefault("minio.endpoint", "localhost:9000")
+	v.SetDefault("minio.bucket", "chatter-images")
+	v.SetDefault("minio.secure", false)
 
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
@@ -103,6 +113,11 @@ func Load() (*AppConfig, error) {
 	_ = v.BindEnv("redis.host", "REDIS_HOST")
 	_ = v.BindEnv("redis.password", "REDIS_PASSWORD")
 	_ = v.BindEnv("casbin.model_file", "CASBIN_MODEL_FILE")
+	_ = v.BindEnv("minio.endpoint", "MINIO_ENDPOINT")
+	_ = v.BindEnv("minio.access_key", "MINIO_ACCESS_KEY")
+	_ = v.BindEnv("minio.secret_key", "MINIO_SECRET_KEY")
+	_ = v.BindEnv("minio.bucket", "MINIO_BUCKET")
+	_ = v.BindEnv("minio.secure", "MINIO_SECURE")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

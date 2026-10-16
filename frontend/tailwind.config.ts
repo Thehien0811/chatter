@@ -39,6 +39,10 @@ const config: Config = {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
+        presence: {
+          online: 'hsl(var(--presence-online))',
+          offline: 'hsl(var(--presence-offline))',
+        },
       },
       borderRadius: {
         lg: 'var(--radius)',

@@ -1,4 +1,55 @@
-@tailwind base; @tailwind components; @tailwind utilities;
-:root { --background: 0 0% 100%; --foreground: 222 47% 11%; --card: 0 0% 100%; --card-foreground: 222 47% 11%; --primary: 221 83% 53%; --primary-foreground: 0 0% 100%; --secondary: 210 40% 96%; --secondary-foreground: 222 47% 11%; --muted: 210 40% 96%; --muted-foreground: 215 16% 47%; --accent: 210 40% 94%; --accent-foreground: 222 47% 11%; --destructive: 0 72% 51%; --border: 214 32% 91%; --input: 214 32% 91%; --ring: 221 83% 53%; --radius: .75rem; }
-.dark { --background: 222 47% 8%; --foreground: 210 40% 98%; --card: 222 47% 10%; --card-foreground: 210 40% 98%; --primary: 217 91% 60%; --primary-foreground: 222 47% 11%; --secondary: 217 33% 17%; --secondary-foreground: 210 40% 98%; --muted: 217 33% 17%; --muted-foreground: 215 20% 65%; --accent: 217 33% 20%; --accent-foreground: 210 40% 98%; --destructive: 0 63% 40%; --border: 217 33% 20%; --input: 217 33% 20%; --ring: 224 76% 48%; }
-* { border-color: hsl(var(--border)); } body { background: hsl(var(--background)); color: hsl(var(--foreground)); }
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 30% 98%;
+  --foreground: 222 28% 14%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 28% 14%;
+  --primary: 209 100% 50%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 210 45% 94%;
+  --secondary-foreground: 222 28% 18%;
+  --muted: 210 30% 95%;
+  --muted-foreground: 218 12% 45%;
+  --accent: 208 100% 94%;
+  --accent-foreground: 214 82% 30%;
+  --destructive: 0 72% 51%;
+  --border: 214 25% 88%;
+  --input: 214 25% 88%;
+  --ring: 209 100% 50%;
+  --presence-online: 146 55% 42%;
+  --presence-offline: 218 12% 60%;
+  --radius: .75rem;
+}
+
+.dark {
+  --background: 220 26% 9%;
+  --foreground: 210 30% 96%;
+  --card: 220 24% 12%;
+  --card-foreground: 210 30% 96%;
+  --primary: 208 100% 58%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 20% 18%;
+  --secondary-foreground: 210 30% 96%;
+  --muted: 220 20% 18%;
+  --muted-foreground: 215 14% 68%;
+  --accent: 215 45% 22%;
+  --accent-foreground: 210 30% 96%;
+  --destructive: 0 63% 46%;
+  --border: 220 18% 24%;
+  --input: 220 18% 24%;
+  --ring: 208 100% 58%;
+  --presence-online: 146 55% 52%;
+  --presence-offline: 215 12% 58%;
+}
+
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}

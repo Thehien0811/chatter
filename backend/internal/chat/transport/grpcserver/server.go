@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -36,11 +37,18 @@ type messageEvent struct {
 	Message eventMessage `json:"message"`
 }
 type eventMessage struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id"`
-	SenderID       string `json:"sender_id"`
-	Body           string `json:"body"`
-	CreatedAt      string `json:"created_at"`
+	ID             string            `json:"id"`
+	ConversationID string            `json:"conversation_id"`
+	SenderID       string            `json:"sender_id"`
+	Body           string            `json:"body"`
+	CreatedAt      string            `json:"created_at"`
+	Attachments    []eventAttachment `json:"attachments,omitempty"`
+}
+type eventAttachment struct {
+	ID        string `json:"id"`
+	MediaType string `json:"media_type"`
+	ByteSize  int64  `json:"byte_size"`
+	URL       string `json:"url"`
 }
 
 func (s *Server) SendMessage(ctx context.Context, req *pb.SendMessageRequest) (*pb.SendMessageResponse, error) {
@@ -132,6 +140,147 @@ func (s *Server) SendMessage(ctx context.Context, req *pb.SendMessageRequest) (*
 		s.publishOfflineNotification(ctx, recipientID, messageID, conversationID, senderID, body, createdAt)
 	}
 	return &pb.SendMessageResponse{MessageId: messageID, Success: true}, nil
+}
+
+func (s *Server) SendImageMessage(ctx context.Context, req *pb.SendImageMessageRequest) (*pb.SendImageMessageResponse, error) {
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database unavailable")
+	}
+	conversationID := strings.TrimSpace(req.GetConversationId())
+	senderID := strings.TrimSpace(req.GetSenderId())
+	mediaID := strings.TrimSpace(req.GetMediaId())
+	storageKey := strings.TrimSpace(req.GetStorageKey())
+	mediaType := strings.TrimSpace(req.GetMediaType())
+	byteSize := req.GetByteSize()
+	if _, err := uuid.Parse(conversationID); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid conversation_id")
+	}
+	if _, err := uuid.Parse(senderID); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid sender_id")
+	}
+	if _, err := uuid.Parse(mediaID); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid media_id")
+	}
+	extensions := map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif"}
+	extension, supported := extensions[mediaType]
+	if !supported || byteSize < 1 || byteSize > 10*1024*1024 ||
+		storageKey != "images/"+senderID+"/"+mediaID+extension {
+		return nil, status.Error(codes.InvalidArgument, "invalid image metadata")
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, "database unavailable")
+	}
+	defer tx.Rollback(ctx)
+	var senderActive bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2 AND left_at IS NULL)`, conversationID, senderID).Scan(&senderActive); err != nil {
+		return nil, dbError(err)
+	}
+	if !senderActive {
+		return nil, status.Error(codes.PermissionDenied, "sender is not an active conversation member")
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO media_objects (id,owner_id,storage_key,media_type,byte_size) VALUES ($1,$2,$3,$4,$5)`, mediaID, senderID, storageKey, mediaType, byteSize); err != nil {
+		return nil, dbError(err)
+	}
+	message := &pb.Message{ConversationId: conversationID, SenderId: senderID}
+	var createdAt time.Time
+	if err := tx.QueryRow(ctx, `INSERT INTO messages (conversation_id,sender_id,kind) VALUES ($1,$2,'image') RETURNING id,created_at`, conversationID, senderID).Scan(&message.Id, &createdAt); err != nil {
+		return nil, dbError(err)
+	}
+	message.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.Exec(ctx, `INSERT INTO message_attachments (message_id,media_object_id,position) VALUES ($1,$2,0)`, message.Id, mediaID); err != nil {
+		return nil, dbError(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE conversations SET last_message_at=$1 WHERE id=$2`, createdAt, conversationID); err != nil {
+		return nil, dbError(err)
+	}
+	rows, err := tx.Query(ctx, `SELECT user_id FROM conversation_members WHERE conversation_id=$1 AND left_at IS NULL AND user_id<>$2`, conversationID, senderID)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	var recipients []string
+	for rows.Next() {
+		var recipientID string
+		if err := rows.Scan(&recipientID); err != nil {
+			rows.Close()
+			return nil, dbError(err)
+		}
+		recipients = append(recipients, recipientID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, dbError(err)
+	}
+	rows.Close()
+	for _, recipientID := range recipients {
+		if _, err := tx.Exec(ctx, `INSERT INTO message_deliveries (message_id,user_id) VALUES ($1,$2) ON CONFLICT (message_id,user_id) DO NOTHING`, message.Id, recipientID); err != nil {
+			return nil, dbError(err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, dbError(err)
+	}
+
+	attachment := &pb.MessageAttachment{Id: mediaID, MediaType: mediaType, ByteSize: byteSize, Url: "/api/v1/media/" + mediaID}
+	message.Attachments = []*pb.MessageAttachment{attachment}
+	s.publishImageMessage(ctx, message, recipients, createdAt)
+	return &pb.SendImageMessageResponse{Message: message}, nil
+}
+
+func (s *Server) publishImageMessage(ctx context.Context, message *pb.Message, recipients []string, createdAt time.Time) {
+	if len(recipients) == 0 {
+		return
+	}
+	attachments := make([]eventAttachment, 0, len(message.GetAttachments()))
+	for _, attachment := range message.GetAttachments() {
+		attachments = append(attachments, eventAttachment{ID: attachment.GetId(), MediaType: attachment.GetMediaType(), ByteSize: attachment.GetByteSize(), URL: attachment.GetUrl()})
+	}
+	payload, err := json.Marshal(messageEvent{Type: "message", Message: eventMessage{
+		ID: message.GetId(), ConversationID: message.GetConversationId(), SenderID: message.GetSenderId(),
+		CreatedAt: message.GetCreatedAt(), Attachments: attachments,
+	}})
+	if err != nil {
+		log.Printf("encode committed image message event: %v", err)
+		return
+	}
+	for _, recipientID := range recipients {
+		if s.redis != nil {
+			if err := s.redis.Publish(ctx, "chat:user:"+recipientID, payload).Err(); err != nil {
+				log.Printf("publish image message event: %v", err)
+			}
+		}
+		if !s.isUserOnline(ctx, recipientID) {
+			s.publishOfflineNotification(ctx, recipientID, message.GetId(), message.GetConversationId(), message.GetSenderId(), "Ảnh", createdAt)
+		}
+	}
+}
+
+func (s *Server) GetMediaObject(ctx context.Context, req *pb.GetMediaObjectRequest) (*pb.GetMediaObjectResponse, error) {
+	if s.db == nil {
+		return nil, status.Error(codes.Unavailable, "database unavailable")
+	}
+	mediaID, userID := strings.TrimSpace(req.GetMediaId()), strings.TrimSpace(req.GetUserId())
+	if _, err := uuid.Parse(mediaID); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid media_id")
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid user_id")
+	}
+	result := &pb.GetMediaObjectResponse{}
+	err := s.db.QueryRow(ctx, `
+		SELECT mo.storage_key,mo.media_type,mo.byte_size
+		FROM media_objects mo
+		JOIN message_attachments ma ON ma.media_object_id=mo.id
+		JOIN messages m ON m.id=ma.message_id AND m.deleted_at IS NULL
+		JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 AND cm.left_at IS NULL
+		WHERE mo.id=$1 AND mo.deleted_at IS NULL
+		LIMIT 1`, mediaID, userID).Scan(&result.StorageKey, &result.MediaType, &result.ByteSize)
+	if err != nil {
+		return nil, dbError(err)
+	}
+	return result, nil
 }
 
 func (s *Server) isUserOnline(ctx context.Context, userID string) bool {
@@ -318,20 +467,30 @@ func (s *Server) ListMessages(ctx context.Context, req *pb.ListMessagesRequest) 
 	if !member {
 		return nil, status.Error(codes.PermissionDenied, "user is not an active conversation member")
 	}
-	rows, err := s.db.Query(ctx, `SELECT id,conversation_id,sender_id,COALESCE(body,''),created_at FROM messages WHERE conversation_id=$1 AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT $2`, conversationID, limit)
+	rows, err := s.db.Query(ctx, `SELECT m.id,m.conversation_id,m.sender_id,COALESCE(m.body,''),m.created_at,mo.id,mo.media_type,mo.byte_size FROM (SELECT id,conversation_id,sender_id,body,created_at FROM messages WHERE conversation_id=$1 AND deleted_at IS NULL ORDER BY created_at DESC,id DESC LIMIT $2) m LEFT JOIN message_attachments ma ON ma.message_id=m.id LEFT JOIN media_objects mo ON mo.id=ma.media_object_id AND mo.deleted_at IS NULL ORDER BY m.created_at DESC,m.id DESC,ma.position`, conversationID, limit)
 	if err != nil {
 		return nil, dbError(err)
 	}
 	defer rows.Close()
 	messages := make([]*pb.Message, 0, limit)
+	messageByID := make(map[string]*pb.Message, limit)
 	for rows.Next() {
-		item := &pb.Message{}
+		var itemID, itemConversationID, senderID, body string
 		var createdAt time.Time
-		if err := rows.Scan(&item.Id, &item.ConversationId, &item.SenderId, &item.Body, &createdAt); err != nil {
+		var mediaID, mediaType *string
+		var byteSize *int64
+		if err := rows.Scan(&itemID, &itemConversationID, &senderID, &body, &createdAt, &mediaID, &mediaType, &byteSize); err != nil {
 			return nil, dbError(err)
 		}
-		item.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
-		messages = append(messages, item)
+		item := messageByID[itemID]
+		if item == nil {
+			item = &pb.Message{Id: itemID, ConversationId: itemConversationID, SenderId: senderID, Body: body, CreatedAt: createdAt.UTC().Format(time.RFC3339Nano)}
+			messageByID[itemID] = item
+			messages = append(messages, item)
+		}
+		if mediaID != nil && mediaType != nil && byteSize != nil {
+			item.Attachments = append(item.Attachments, &pb.MessageAttachment{Id: *mediaID, MediaType: *mediaType, ByteSize: *byteSize, Url: "/api/v1/media/" + *mediaID})
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, dbError(err)

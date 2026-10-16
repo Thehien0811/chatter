@@ -47,3 +47,21 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+
+export async function apiBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  let response = await send(path, init);
+  if (response.status === 401 && path !== '/auth/refresh') {
+    const token = await refreshAccessToken().catch(() => null);
+    if (token) response = await send(path, init);
+  }
+  if (!response.ok) {
+    const raw = await response.text();
+    let message = raw || `Request failed (${response.status})`;
+    try {
+      const body = JSON.parse(raw) as { error?: string };
+      if (body.error) message = body.error;
+    } catch { /* Keep the plain-text response. */ }
+    throw new Error(message);
+  }
+  return response.blob();
+}

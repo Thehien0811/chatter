@@ -4,7 +4,29 @@ let socket: WebSocket | null = null;
 let retryTimer: number | null = null;
 let retryAttempt = 0;
 let manuallyClosed = false;
+let onlineListenerRegistered = false;
 const messageListeners = new Set<(event: MessageEvent<string>) => void>();
+const socketStateListeners = new Set<(connection: WebSocket | null) => void>();
+
+function notifySocketState(connection: WebSocket | null) {
+  for (const listener of socketStateListeners) listener(connection);
+}
+
+function scheduleReconnect(delay: number) {
+  if (manuallyClosed || typeof window === 'undefined' || retryTimer !== null) return;
+  retryTimer = window.setTimeout(() => {
+    retryTimer = null;
+    getSocket();
+  }, delay);
+}
+
+function handleNetworkOnline() {
+  if (manuallyClosed || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+  if (retryTimer !== null) window.clearTimeout(retryTimer);
+  retryTimer = null;
+  retryAttempt = 0;
+  scheduleReconnect(0);
+}
 
 function createSocket(token: string) {
   const endpoint = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8080';
@@ -15,14 +37,25 @@ function createSocket(token: string) {
 
   const connection = new WebSocket(url.toString());
   socket = connection;
+  notifySocketState(connection);
+  if (!onlineListenerRegistered) {
+    window.addEventListener('online', handleNetworkOnline);
+    onlineListenerRegistered = true;
+  }
   connection.addEventListener('message', (event) => { for (const listener of messageListeners) listener(event as MessageEvent<string>); });
-  connection.addEventListener('open', () => { retryAttempt = 0; });
+  connection.addEventListener('open', () => {
+    retryAttempt = 0;
+    notifySocketState(connection);
+  });
   connection.addEventListener('close', () => {
-    if (socket === connection) socket = null;
-    if (manuallyClosed || retryAttempt >= 5 || typeof window === 'undefined') return;
+    if (socket === connection) {
+      socket = null;
+      notifySocketState(null);
+    }
+    if (manuallyClosed || typeof window === 'undefined') return;
     const delay = Math.min(1000 * 2 ** retryAttempt, 30_000);
-    retryAttempt += 1;
-    retryTimer = window.setTimeout(() => { retryTimer = null; getSocket(); }, delay);
+    retryAttempt = Math.min(retryAttempt + 1, 5);
+    scheduleReconnect(delay);
   });
   return connection;
 }
@@ -42,12 +75,23 @@ export function closeSocket() {
   retryAttempt = 0;
   if (retryTimer !== null && typeof window !== 'undefined') window.clearTimeout(retryTimer);
   retryTimer = null;
+  if (onlineListenerRegistered && typeof window !== 'undefined') {
+    window.removeEventListener('online', handleNetworkOnline);
+    onlineListenerRegistered = false;
+  }
   const current = socket;
   socket = null;
+  notifySocketState(null);
   current?.close(1000, 'Signed out');
 }
 
 export function addSocketMessageListener(listener: (event: MessageEvent<string>) => void) {
   messageListeners.add(listener);
   return () => { messageListeners.delete(listener); };
+}
+
+export function addSocketStateListener(listener: (connection: WebSocket | null) => void) {
+  socketStateListeners.add(listener);
+  listener(socket);
+  return () => { socketStateListeners.delete(listener); };
 }

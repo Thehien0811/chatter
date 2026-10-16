@@ -1,12 +1,74 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, PhoneOff, Video, VideoOff } from 'lucide-react';
+import * as Dialog from '@radix-ui/react-dialog';
+import { Camera, CameraOff, Mic, MicOff, Video, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useWebRTC } from '@/hooks/use-webrtc';
-import type { User } from '@/types/user';
-import { toast } from 'sonner';
-function StreamVideo({ stream, muted=false, className='' }: { stream:MediaStream|null; muted?:boolean; className?:string }) { const ref=useRef<HTMLVideoElement>(null);useEffect(()=>{if(ref.current)ref.current.srcObject=stream;},[stream]);return <video ref={ref} autoPlay playsInline muted={muted} className={className}/>; }
-export function CallScreen({conversationId,peer,video=true,onEnd}:{conversationId:string;peer:User;video?:boolean;onEnd:()=>void}) {
- const call=useWebRTC(conversationId);const startCall=call.start;const [position,setPosition]=useState({x:0,y:0});useEffect(()=>{void startCall(video).catch(()=>toast.error('Không thể truy cập camera hoặc microphone.'));},[startCall,video]);
- return <div className="fixed inset-0 z-[70] flex flex-col bg-slate-950 text-white"><div className="relative flex flex-1 items-center justify-center overflow-hidden"><StreamVideo stream={call.remoteStream} className="absolute inset-0 h-full w-full object-cover"/><div className="z-10 text-center"><div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full bg-white/10 text-3xl">{peer.display_name.slice(0,1)}</div><p className="mt-4 text-xl font-semibold">{peer.display_name}</p><p className="mt-1 text-sm text-white/70">Đang kết nối…</p></div><div draggable onDragEnd={e=>setPosition({x:position.x+e.clientX-120,y:position.y+e.clientY-120})} style={{transform:`translate(${position.x}px, ${position.y}px)`}} className="absolute bottom-24 right-5 z-20 h-36 w-28 cursor-move overflow-hidden rounded-xl border border-white/30 bg-slate-800 shadow-lg"><StreamVideo stream={call.localStream} muted className="h-full w-full object-cover"/></div></div><div className="flex items-center justify-center gap-4 pb-8"><Button variant="secondary" size="icon" className="h-12 w-12 rounded-full" onClick={call.toggleMic} aria-label="Bật/tắt mic">{call.micEnabled?<Mic/>:<MicOff/>}</Button><Button variant="secondary" size="icon" className="h-12 w-12 rounded-full" onClick={call.toggleCamera} aria-label="Bật/tắt camera">{call.cameraEnabled?<Video/>:<VideoOff/>}</Button><Button variant="destructive" size="icon" className="h-14 w-14 rounded-full" aria-label="Kết thúc cuộc gọi" onClick={()=>{call.end();onEnd();}}><PhoneOff/></Button></div></div>;
+import { useMediaPreview } from '@/hooks/use-media-preview';
+function LocalVideo({ stream }: { stream: MediaStream | null }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+  return <video ref={ref} autoPlay playsInline muted className="h-full w-full object-cover"/>;
+}
+
+function mediaErrorMessage(reason: unknown) {
+  if (reason instanceof DOMException) {
+    if (reason.name === 'NotAllowedError' || reason.name === 'PermissionDeniedError') {
+      return 'Hãy cấp quyền camera và microphone cho trình duyệt rồi thử lại.';
+    }
+    if (reason.name === 'NotFoundError' || reason.name === 'DevicesNotFoundError') {
+      return 'Không tìm thấy camera hoặc microphone trên thiết bị này.';
+    }
+    if (reason.name === 'NotReadableError' || reason.name === 'TrackStartError') {
+      return 'Camera hoặc microphone đang được một ứng dụng khác sử dụng.';
+    }
+  }
+  return reason instanceof Error ? reason.message : 'Không thể truy cập camera hoặc microphone.';
+}
+
+export function VideoPreviewDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+ const call = useMediaPreview();
+ const { startPreview, end } = call;
+ const [error, setError] = useState('');
+ useEffect(() => {
+   if (!open) return;
+   let active = true;
+   startPreview().then(() => {
+     if (active) setError('');
+   }).catch((reason: unknown) => {
+     if (!active) return;
+     setError(mediaErrorMessage(reason));
+   });
+   return () => {
+     active = false;
+     end();
+   };
+ }, [open, startPreview, end]);
+
+ const close = () => {
+   end();
+   setError('');
+   onClose();
+ };
+
+ return <Dialog.Root open={open} onOpenChange={(next) => { if (!next) close(); }}>
+   <Dialog.Portal>
+     <Dialog.Overlay className="fixed inset-0 z-[70] bg-foreground/40 backdrop-blur-sm"/>
+     <Dialog.Content className="fixed left-1/2 top-1/2 z-[70] w-[min(94vw,720px)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-3xl border border-primary/15 bg-card shadow-2xl">
+       <header className="flex items-center justify-between border-b border-primary/10 px-5 py-4">
+         <div><Dialog.Title className="font-semibold">Xem trước cuộc gọi video</Dialog.Title><Dialog.Description className="mt-1 text-xs text-muted-foreground">Đây chỉ là preview cục bộ, chưa kết nối với người nhận.</Dialog.Description></div>
+         <Button variant="ghost" size="icon" onClick={close} aria-label="Đóng preview"><X className="h-4 w-4"/></Button>
+       </header>
+       <div className="relative aspect-video bg-secondary">
+         {call.localStream ? <LocalVideo stream={call.localStream}/> : <div className="flex h-full flex-col items-center justify-center gap-3 px-5 text-center"><CameraOff className="h-9 w-9 text-muted-foreground"/><p className="max-w-md text-sm text-muted-foreground">{error || 'Đang yêu cầu quyền sử dụng camera và microphone…'}</p>{error && <Button variant="outline" className="rounded-full" onClick={() => { setError(''); void call.startPreview().catch((reason: unknown) => setError(mediaErrorMessage(reason))); }}>Thử lại</Button>}</div>}
+       </div>
+       <footer className="flex items-center justify-center gap-3 border-t border-primary/10 px-5 py-4">
+         <Button variant={call.micEnabled ? 'secondary' : 'destructive'} size="icon" className="rounded-full" onClick={call.toggleMic} aria-label={call.micEnabled ? 'Tắt microphone' : 'Bật microphone'}><span className="relative"><Mic className="h-4 w-4"/>{!call.micEnabled && <MicOff className="absolute -right-1 -top-1 h-3 w-3"/>}</span></Button>
+         <Button variant={call.cameraEnabled ? 'secondary' : 'destructive'} size="icon" className="rounded-full" onClick={call.toggleCamera} aria-label={call.cameraEnabled ? 'Tắt camera' : 'Bật camera'}>{call.cameraEnabled ? <Video className="h-4 w-4"/> : <Camera className="h-4 w-4"/>}</Button>
+         <Button variant="destructive" className="rounded-full px-5" onClick={close}>Đóng preview</Button>
+       </footer>
+     </Dialog.Content>
+   </Dialog.Portal>
+ </Dialog.Root>;
 }

@@ -83,7 +83,7 @@ func (h *websocketHub) register(userID string, conn *websocket.Conn) (func(), er
 }
 
 func (h *websocketHub) subscribe(ctx context.Context, userID string, ready chan<- error) {
-	pubsub := h.redis.Subscribe(ctx, "chat:user:"+userID, "friend:user:"+userID)
+	pubsub := h.redis.Subscribe(ctx, "chat:user:"+userID, "friend:user:"+userID, "call:user:"+userID)
 	defer pubsub.Close()
 	if _, err := pubsub.Receive(ctx); err != nil {
 		ready <- err
@@ -111,6 +111,30 @@ func (h *websocketHub) hasUser(userID string) bool {
 }
 
 func (h *websocketHub) writeConnection(conn *websocket.Conn, payload []byte) error {
+	return h.write(conn, func() error {
+		return conn.WriteMessage(websocket.TextMessage, payload)
+	})
+}
+
+func (h *websocketHub) writeControl(userID string, conn *websocket.Conn, messageType int, payload []byte, deadline time.Time) error {
+	h.mu.RLock()
+	writeMu := h.users[userID][conn]
+	h.mu.RUnlock()
+	if writeMu == nil {
+		return websocket.ErrCloseSent
+	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	h.mu.RLock()
+	active := h.users[userID][conn] == writeMu
+	h.mu.RUnlock()
+	if !active {
+		return websocket.ErrCloseSent
+	}
+	return conn.WriteControl(messageType, payload, deadline)
+}
+
+func (h *websocketHub) write(conn *websocket.Conn, write func() error) error {
 	h.mu.RLock()
 	var userID string
 	var writeMu *sync.Mutex
@@ -132,7 +156,7 @@ func (h *websocketHub) writeConnection(conn *websocket.Conn, payload []byte) err
 	if !active {
 		return websocket.ErrCloseSent
 	}
-	return conn.WriteMessage(websocket.TextMessage, payload)
+	return write()
 }
 
 func (h *websocketHub) broadcast(userID string, payload []byte) {

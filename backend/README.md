@@ -257,3 +257,10 @@ Generated protobuf messages and gRPC clients/servers are checked in under proto/
 
 The protoc binary and the Go bin directory must both be available on PATH. buf.gen.yaml is also included for teams that use Buf.
 
+## Local image storage
+
+Copy `.env.example` to `.env`, set a local MinIO password, then start the
+Compose stack with `docker compose up -d`. The API Gateway creates the
+configured private bucket on first upload. Images are restricted to valid
+JPEG, PNG, or GIF files up to 10 MB and are served through the authenticated
+Gateway; the MinIO bucket is not public.

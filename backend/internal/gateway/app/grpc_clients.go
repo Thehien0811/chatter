@@ -33,18 +33,33 @@ type AuthTokens struct {
 }
 
 type ChatParticipant struct {
-	ID          string `json:"id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	Presence    string `json:"presence"`
+	ID              string `json:"id"`
+	Username        string `json:"username"`
+	DisplayName     string `json:"display_name"`
+	Presence        string `json:"presence"`
+	PresenceVersion int64  `json:"presence_version"`
 }
 
 type ChatMessage struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id"`
-	SenderID       string `json:"sender_id"`
-	Body           string `json:"body"`
-	CreatedAt      string `json:"created_at"`
+	ID             string           `json:"id"`
+	ConversationID string           `json:"conversation_id"`
+	SenderID       string           `json:"sender_id"`
+	Body           string           `json:"body"`
+	CreatedAt      string           `json:"created_at"`
+	Attachments    []ChatAttachment `json:"attachments,omitempty"`
+}
+
+type ChatAttachment struct {
+	ID        string `json:"id"`
+	MediaType string `json:"media_type"`
+	ByteSize  int64  `json:"byte_size"`
+	URL       string `json:"url"`
+}
+
+type MediaObject struct {
+	StorageKey string
+	MediaType  string
+	ByteSize   int64
 }
 
 type ChatConversation struct {
@@ -211,6 +226,43 @@ func (s *ServiceClients) SendMessage(ctx context.Context, conversationID, sender
 	return response.GetMessageId(), nil
 }
 
+func (s *ServiceClients) SendImageMessage(ctx context.Context, conversationID, senderID, mediaID, storageKey, mediaType string, byteSize int64) (*ChatMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	response, err := s.chat.SendImageMessage(ctx, &pb.SendImageMessageRequest{
+		ConversationId: conversationID, SenderId: senderID, MediaId: mediaID,
+		StorageKey: storageKey, MediaType: mediaType, ByteSize: byteSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+	message := response.GetMessage()
+	if message == nil {
+		return nil, fmt.Errorf("chat service returned an empty image message")
+	}
+	return chatMessage(message), nil
+}
+
+func (s *ServiceClients) GetMediaObject(ctx context.Context, mediaID, userID string) (*MediaObject, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.chat.GetMediaObject(ctx, &pb.GetMediaObjectRequest{MediaId: mediaID, UserId: userID})
+	if err != nil {
+		return nil, err
+	}
+	return &MediaObject{StorageKey: response.GetStorageKey(), MediaType: response.GetMediaType(), ByteSize: response.GetByteSize()}, nil
+}
+
+func (s *ServiceClients) IsFriend(ctx context.Context, userAID, userBID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	response, err := s.friend.IsFriend(ctx, &pb.IsFriendRequest{UserAId: userAID, UserBId: userBID})
+	if err != nil {
+		return false, err
+	}
+	return response.GetIsFriend(), nil
+}
+
 func (s *ServiceClients) GetOrCreateDirectConversation(ctx context.Context, userID, recipientID string) (*ChatConversation, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -244,9 +296,20 @@ func (s *ServiceClients) ListMessages(ctx context.Context, conversationID, userI
 	}
 	items := make([]ChatMessage, 0, len(response.GetMessages()))
 	for _, m := range response.GetMessages() {
-		items = append(items, ChatMessage{ID: m.GetId(), ConversationID: m.GetConversationId(), SenderID: m.GetSenderId(), Body: m.GetBody(), CreatedAt: m.GetCreatedAt()})
+		items = append(items, *chatMessage(m))
 	}
 	return items, nil
+}
+
+func chatMessage(message *pb.Message) *ChatMessage {
+	result := &ChatMessage{ID: message.GetId(), ConversationID: message.GetConversationId(), SenderID: message.GetSenderId(), Body: message.GetBody(), CreatedAt: message.GetCreatedAt()}
+	for _, attachment := range message.GetAttachments() {
+		result.Attachments = append(result.Attachments, ChatAttachment{
+			ID: attachment.GetId(), MediaType: attachment.GetMediaType(),
+			ByteSize: attachment.GetByteSize(), URL: attachment.GetUrl(),
+		})
+	}
+	return result
 }
 
 func chatConversation(item *pb.Conversation) *ChatConversation {

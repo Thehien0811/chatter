@@ -8,6 +8,8 @@ option go_package = "github.com/thehien0811/chatter/proto;proto";
 // recipient events to Redis channels named chat:user:<user_id>.
 service ChatService {
   rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc SendImageMessage(SendImageMessageRequest) returns (SendImageMessageResponse);
+  rpc GetMediaObject(GetMediaObjectRequest) returns (GetMediaObjectResponse);
   rpc GetOrCreateDirectConversation(GetOrCreateDirectConversationRequest) returns (Conversation);
   rpc ListConversations(ListConversationsRequest) returns (ListConversationsResponse);
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
@@ -17,6 +19,21 @@ service ChatService {
 
 message SendMessageRequest { string conversation_id = 1; string sender_id = 2; string body = 3; }
 message SendMessageResponse { string message_id = 1; bool success = 2; }
+message SendImageMessageRequest {
+  string conversation_id = 1;
+  string sender_id = 2;
+  string media_id = 3;
+  string storage_key = 4;
+  string media_type = 5;
+  int64 byte_size = 6;
+}
+message SendImageMessageResponse { Message message = 1; }
+message GetMediaObjectRequest { string media_id = 1; string user_id = 2; }
+message GetMediaObjectResponse {
+  string storage_key = 1;
+  string media_type = 2;
+  int64 byte_size = 3;
+}
 message GetOrCreateDirectConversationRequest { string user_id = 1; string recipient_id = 2; }
 message ListConversationsRequest { string user_id = 1; }
 message ListConversationsResponse { repeated Conversation conversations = 1; }
@@ -34,7 +51,20 @@ message Conversation {
   string last_message_id = 11;
 }
 message ListMessagesRequest { string conversation_id = 1; int32 limit = 2; string user_id = 3; }
-message Message { string id = 1; string conversation_id = 2; string sender_id = 3; string body = 4; string created_at = 5; }
+message Message {
+  string id = 1;
+  string conversation_id = 2;
+  string sender_id = 3;
+  string body = 4;
+  string created_at = 5;
+  repeated MessageAttachment attachments = 6;
+}
+message MessageAttachment {
+  string id = 1;
+  string media_type = 2;
+  int64 byte_size = 3;
+  string url = 4;
+}
 message ListMessagesResponse { repeated Message messages = 1; }
 message ListUnreadMessagesRequest { string user_id = 1; int32 limit = 2; }
 message UnreadMessage {
